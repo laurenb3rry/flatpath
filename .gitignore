@@ -1,0 +1,16 @@
+.DS_Store
+graphbuild/data/
+__pycache__/
+*.pyc
+.venv/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+FlatPathGraph.bin
+
+.claude/
+.tokensave/
+.serena/
+.headroom*
+
+PLAN.md

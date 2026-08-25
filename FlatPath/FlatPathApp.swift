@@ -41,33 +41,37 @@ struct FlatPathApp: App {
 
     var body: some Scene {
         WindowGroup {
-            GraphStatusView(graph: graph)
+            switch graph {
+            case .success:
+                MapContainerView()
+            case .failure(let error):
+                GraphUnavailableView(error: error)
+            }
         }
     }
 }
 
-/// Placeholder first screen: the graph's vital signs, or why it would not load.
-/// Stands in until the map becomes the app's root view.
-private struct GraphStatusView: View {
-    let graph: Result<WalkingGraph, Error>
+/// Shown instead of the map when the graph could not be read.
+///
+/// There is no degraded mode worth offering here. A basemap with no graph under
+/// it would take destinations and then refuse every route, so the failure is
+/// stated plainly at launch rather than discovered one trip at a time.
+private struct GraphUnavailableView: View {
+    let error: Error
 
     var body: some View {
         VStack(spacing: 12) {
             Text("FlatPath")
                 .font(.title.weight(.semibold))
 
-            switch graph {
-            case .success(let graph):
-                Text("\(graph.nodeCount) nodes")
-                Text("\(graph.edgeCount) directed edges")
-                Text("\(graph.streetNames.count) street names")
-            case .failure(let error):
-                Text("Graph failed to load")
-                Text(String(describing: error))
-                    .multilineTextAlignment(.center)
-            }
+            Text("The walking map could not be loaded, so no routes can be found.")
+                .multilineTextAlignment(.center)
+
+            Text(String(describing: error))
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
-        .font(.system(.body, design: .monospaced))
         .padding()
     }
 }

@@ -25,8 +25,8 @@ venv/
 # raw OSM + DEM inputs — large, redownloadable
 graphbuild/data/
 
-# pipeline output — regenerate with `python graphbuild/build_graph.py`
-FlatPathGraph.bin
+# The built graph in FlatPath/Resources/ is committed: the app bundles it, so a
+# clone has to be able to build without a 1.2 GB data download first.
 
 # --- Swift / Xcode ---
 build/

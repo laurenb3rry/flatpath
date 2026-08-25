@@ -1,9 +1,11 @@
-"""Tunable constants for the graph build: cost-function parameters, and later the
-SF bounding box and pipeline file paths.
+"""Tunable constants for the graph build: cost-function parameters, the area to
+cover, and where the input and output files live.
 
 The cost constants below are tuned. Changing them changes every baked edge cost,
 so the graph must be rebuilt and the app's bundled binary replaced.
 """
+
+from pathlib import Path
 
 # --- Cost function ---
 
@@ -33,3 +35,47 @@ DOWNHILL_SUFFERING = 0.15
 # to get a lower bound on remaining time, so it must not be exceeded by any real
 # edge speed or the search can return a suboptimal route.
 MAX_SPEED_MS = 1.667
+
+
+# --- Coverage ---
+
+# The area the graph covers, as (west, south, east, north) in degrees. Roughly
+# the SF peninsula: Ocean Beach to the Bay, Daly City line to the Golden Gate.
+# The app can only route between points inside this box, so destination search
+# must be restricted to the same area.
+SF_BBOX = (-122.5150, 37.7080, -122.3570, 37.8330)  # TUNE
+
+
+# --- Geometry guards ---
+
+# Edges shorter than this are treated as this long when computing slope. Two OSM
+# nodes can sit centimeters apart; dividing a real elevation change by that
+# distance yields a nonsense grade and an enormous cost. Length is only clamped
+# for the slope calculation -- the true length is still what gets reported as
+# distance.
+MIN_SLOPE_LENGTH_M = 5.0
+
+# Ceiling on absolute grade. The steepest street in SF is about 32%, so anything
+# past this is elevation-data noise rather than terrain -- typically a node that
+# landed on a building edge or a retaining wall in the raster. Left uncapped,
+# a handful of these would become impassable walls the router steers around.
+MAX_ABS_SLOPE = 0.50  # TUNE
+
+
+# --- Files ---
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
+
+# OSM extract to read. Any .osm.pbf covering the bbox works; the pipeline clips
+# to SF itself, so a regional extract is fine and avoids a statewide download.
+OSM_EXTRACT = DATA_DIR / "norcal-latest.osm.pbf"
+
+# Elevation rasters. Every .tif in the data directory is treated as a DEM tile
+# and consulted when sampling, so adding coverage means dropping in more files.
+DEM_TILE_GLOB = "*.tif"
+
+GRAPH_FILENAME = "FlatPathGraph.bin"
+GRAPH_OUTPUT = DATA_DIR / GRAPH_FILENAME
+
+# The app loads the graph from its bundle, so the build copies its output here.
+APP_RESOURCES_DIR = Path(__file__).resolve().parent.parent / "FlatPath" / "Resources"

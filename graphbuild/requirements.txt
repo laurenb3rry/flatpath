@@ -1,4 +1,4 @@
-# Pinned in Phase 2. See PLAN.md §9.
 pyosmium
 rasterio
 numpy
+pytest

@@ -1,4 +1,8 @@
-"""Entrypoint: orchestrates the whole pipeline.
+"""Entry point for the graph build. Run this to produce FlatPathGraph.bin.
 
-Populated in Phase 2. See PLAN.md §3.2.
+Runs the pipeline end to end: parse the OSM extract, sample elevations, build
+directed edges with baked costs, serialize. Intended to be run on a Mac once,
+and re-run only when the underlying OSM or elevation data is refreshed.
+
+Not yet implemented.
 """

@@ -1,4 +1,9 @@
-"""OSM extract -> filtered pedestrian nodes + ways.
+"""Reads an OSM extract and keeps only what a pedestrian can walk on.
 
-Populated in Phase 2. See PLAN.md §3.2 step 1-2.
+Filters ways down to walkable highway types, then splits each one into segments
+at every node shared with another way, so the result is a node-to-node graph
+rather than a collection of long polylines. Street names are carried through
+because turn-by-turn instructions need them later.
+
+Not yet implemented.
 """

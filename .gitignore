@@ -1,16 +1,48 @@
+# --- macOS ---
 .DS_Store
-graphbuild/data/
-__pycache__/
-*.pyc
-.venv/
-xcuserdata/
-*.xcuserstate
-DerivedData/
-FlatPathGraph.bin
+.AppleDouble
+.LSOverride
+._*
 
+# --- Tooling / agent state ---
 .claude/
 .tokensave/
 .serena/
 .headroom*
 
 PLAN.md
+README.md
+
+# --- Python (graphbuild) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# raw OSM + DEM inputs — large, redownloadable
+graphbuild/data/
+
+# pipeline output — regenerate with `python graphbuild/build_graph.py`
+FlatPathGraph.bin
+
+# --- Swift / Xcode ---
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# CocoaPods / Carthage (unused today, cheap to keep)
+Pods/
+Carthage/Build/

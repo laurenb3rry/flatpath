@@ -45,6 +45,12 @@ struct MapContainerView: View {
     /// Why there are no routes, when the reason is worth showing.
     @State private var routingProblem: String?
 
+    /// The route being walked, once the walker has started on one. Holding the
+    /// route rather than a flag keeps navigation on the option that was chosen:
+    /// a replan behind the covered screen cannot swap the instructions out from
+    /// under someone already following them.
+    @State private var navigating: PlannedRoute?
+
     /// Opens on the whole service area, so the first frame shows the walker
     /// exactly how much ground the app covers before it asks for their location.
     @State private var camera: MapCameraPosition = .region(ServiceArea.region)
@@ -95,6 +101,11 @@ struct MapContainerView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) { searchPanel }
         .safeAreaInset(edge: .bottom, spacing: 0) { tripPanel }
+        .fullScreenCover(item: $navigating) { walk in
+            NavigationView(route: walk.option, graph: graph, location: location) {
+                navigating = nil
+            }
+        }
         .task { location.start() }
         .task(id: query) { await search.search(matching: query) }
         .task(id: planRequest) { await planRoutes() }
@@ -361,11 +372,38 @@ private extension MapContainerView {
             if !routes.isEmpty {
                 RouteCardsView(routes: routes.map(\.option), selection: $selectedRoute)
                 Divider()
+                startButton
+                Divider()
             }
 
             tripSummary
         }
         .background(.regularMaterial)
+    }
+
+    /// Enters turn-by-turn on the selected route.
+    ///
+    /// Deliberately a second act rather than something a card tap does on its
+    /// own. Tapping between the cards is how the walker compares the routes --
+    /// each tap redraws one in the accent color so it can be looked at on the
+    /// map -- and a tap that launched navigation would make the comparison the
+    /// app exists for impossible to perform without leaving it three times.
+    @ViewBuilder
+    var startButton: some View {
+        let selected = routes.first { $0.id == selectedRoute }
+
+        Button {
+            navigating = selected
+        } label: {
+            Label("Start \(selected?.option.name ?? "")", systemImage: "figure.walk")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+        .disabled(selected == nil)
     }
 
     /// What a set of routes is a function of. Planning restarts when this

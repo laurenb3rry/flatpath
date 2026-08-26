@@ -89,48 +89,6 @@ private struct RouteCard: View {
     }
 }
 
-// MARK: - Number formatting
-
-// Feet and miles, unconditionally. The app covers one American city, and the
-// row format depends on these staying short and predictable: locale-driven units
-// would put a four-character number where a two-character one was budgeted and
-// break the alignment the cards are read by.
-private extension RouteMetrics {
-    /// Rounded to the minute, and never to zero — a walk that takes forty
-    /// seconds still takes a minute of the walker's attention.
-    var timeText: String {
-        let minutes = max(1, Int((time / 60).rounded()))
-        guard minutes >= 60 else { return "\(minutes) min" }
-        return "\(minutes / 60) hr \(minutes % 60) min"
-    }
-
-    /// Climb in feet, to the nearest five.
-    ///
-    /// The elevation behind this is sampled from a 1-meter raster at each end of
-    /// each block, so the foot digit is noise. Rounding it off states the
-    /// precision the number actually has, and keeps the column from twitching
-    /// between recomputations of the same route.
-    var elevationGainText: String {
-        let feet = elevationGain * Self.feetPerMeter
-        let rounded = (feet / 5).rounded() * 5
-        return "\(Int(rounded)) ft ↑"
-    }
-
-    /// Miles to one decimal, or whole feet for anything under a tenth of one,
-    /// where "0.1 mi" would be rounder than the walker needs.
-    var distanceText: String {
-        let miles = distance / Self.metersPerMile
-        guard miles >= 0.1 else {
-            let feet = (distance * Self.feetPerMeter / 10).rounded() * 10
-            return "\(Int(feet)) ft"
-        }
-        return String(format: "%.1f mi", miles)
-    }
-
-    private static let feetPerMeter = 3.280_839_895
-    private static let metersPerMile = 1_609.344
-}
-
 #Preview {
     @Previewable @State var selection: RouteOption.ID? = 1
 

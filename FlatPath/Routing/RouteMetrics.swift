@@ -50,3 +50,55 @@ extension RouteMetrics {
         self.init(time: time, elevationGain: elevationGain, distance: distance)
     }
 }
+
+// MARK: - Display
+
+/// Feet, miles and minutes, unconditionally.
+///
+/// The app covers one American city, and the layouts these figures appear in
+/// depend on them staying short and predictable: locale-driven units would put a
+/// four-character number where a two-character one was budgeted and break the
+/// column alignment the route cards are read by.
+///
+/// One place for all of them, because a route measured one way on a card and
+/// another way in the turn-by-turn instructions for the same walk reads as two
+/// different routes.
+enum WalkingFigures {
+    /// Rounded to the minute, and never to zero — a walk that takes forty
+    /// seconds still takes a minute of the walker's attention.
+    static func duration(seconds: Double) -> String {
+        let minutes = max(1, Int((seconds / 60).rounded()))
+        guard minutes >= 60 else { return "\(minutes) min" }
+        return "\(minutes / 60) hr \(minutes % 60) min"
+    }
+
+    /// Climb in feet, to the nearest five.
+    ///
+    /// The elevation behind this is sampled from a 1-meter raster at each end of
+    /// each block, so the foot digit is noise. Rounding it off states the
+    /// precision the number actually has, and keeps the figure from twitching
+    /// between recomputations of the same route.
+    static func climb(meters: Double) -> String {
+        let feet = meters * feetPerMeter
+        return "\(Int((feet / 5).rounded() * 5)) ft ↑"
+    }
+
+    /// Miles to one decimal, or whole feet for anything under a tenth of one,
+    /// where "0.1 mi" would be rounder than the walker needs.
+    static func distance(meters: Double) -> String {
+        let miles = meters / metersPerMile
+        guard miles >= 0.1 else {
+            return "\(Int((meters * feetPerMeter / 10).rounded() * 10)) ft"
+        }
+        return String(format: "%.1f mi", miles)
+    }
+
+    private static let feetPerMeter = 3.280_839_895
+    private static let metersPerMile = 1_609.344
+}
+
+extension RouteMetrics {
+    var timeText: String { WalkingFigures.duration(seconds: time) }
+    var elevationGainText: String { WalkingFigures.climb(meters: elevationGain) }
+    var distanceText: String { WalkingFigures.distance(meters: distance) }
+}

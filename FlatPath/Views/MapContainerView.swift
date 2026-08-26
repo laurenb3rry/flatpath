@@ -15,12 +15,21 @@
 //  which covers the world, but there is no graph underneath it — so the refusal
 //  has to happen here at the point of entry, while there is still a gesture to
 //  attach the explanation to.
+//
+//  Once both ends exist the routes are found here too, off the main actor: three
+//  searches across a city-sized graph are milliseconds of work, but they are
+//  milliseconds spent between two frames, and the map is being panned while they
+//  run.
 
 import CoreLocation
 import MapKit
 import SwiftUI
 
 struct MapContainerView: View {
+    /// The walking network every route is found in. Handed over already loaded,
+    /// because there is no version of this screen that works without it.
+    let graph: WalkingGraph
+
     @State private var location = LocationManager()
     @State private var search = DestinationSearch()
 
@@ -28,6 +37,13 @@ struct MapContainerView: View {
     @FocusState private var isSearchFocused: Bool
     @State private var destination: Destination?
     @State private var rejectedPin: String?
+
+    @State private var routes: [PlannedRoute] = []
+    @State private var selectedRoute: RouteOption.ID?
+    @State private var isRouting = false
+
+    /// Why there are no routes, when the reason is worth showing.
+    @State private var routingProblem: String?
 
     /// Opens on the whole service area, so the first frame shows the walker
     /// exactly how much ground the app covers before it asks for their location.
@@ -45,6 +61,21 @@ struct MapContainerView: View {
     var body: some View {
         MapReader { proxy in
             Map(position: $camera) {
+                // Unselected first, then the selected one, then the markers.
+                // Order is depth here, and where two routes share a block the
+                // one the walker chose has to be the line on top of the pile.
+                ForEach(routes) { route in
+                    if route.id != selectedRoute {
+                        MapPolyline(coordinates: route.coordinates)
+                            .stroke(.secondary, style: Self.alternativeRouteStroke)
+                    }
+                }
+
+                if let selected = routes.first(where: { $0.id == selectedRoute }) {
+                    MapPolyline(coordinates: selected.coordinates)
+                        .stroke(.tint, style: Self.selectedRouteStroke)
+                }
+
                 if let start {
                     Annotation("Start", coordinate: start) {
                         StartMarker()
@@ -63,9 +94,10 @@ struct MapContainerView: View {
             .gesture(dropPin(using: proxy))
         }
         .safeAreaInset(edge: .top, spacing: 0) { searchPanel }
-        .safeAreaInset(edge: .bottom, spacing: 0) { tripSummary }
+        .safeAreaInset(edge: .bottom, spacing: 0) { tripPanel }
         .task { location.start() }
         .task(id: query) { await search.search(matching: query) }
+        .task(id: planRequest) { await planRoutes() }
         .onChange(of: location.hasFix) { _, hasFix in
             // Frame the arrival of a fix, not every update after it. Re-framing
             // on each new position would wrestle the map back from a walker who
@@ -249,11 +281,12 @@ private extension MapContainerView {
                 title: "Destination",
                 detail: destination.map { $0.address ?? $0.name } ?? "Press and hold the map, or search above",
                 isSet: destination != nil,
-                trailing: destination == nil ? nil : "Clear"
+                trailing: destination == nil ? nil : "Clear",
+                isBusy: isRouting
             )
 
-            if let rejectedPin {
-                Text(rejectedPin)
+            if let notice = rejectedPin ?? routingProblem {
+                Text(notice)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -261,7 +294,6 @@ private extension MapContainerView {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial)
     }
 
     var startDetail: String {
@@ -282,7 +314,8 @@ private extension MapContainerView {
         title: String,
         detail: String,
         isSet: Bool,
-        trailing: String? = nil
+        trailing: String? = nil,
+        isBusy: Bool = false
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol)
@@ -301,6 +334,10 @@ private extension MapContainerView {
 
             Spacer(minLength: 0)
 
+            if isBusy {
+                ProgressView().controlSize(.small)
+            }
+
             if let trailing {
                 Button(trailing) { clearDestination() }
                     .font(.footnote)
@@ -308,6 +345,161 @@ private extension MapContainerView {
                     .foregroundStyle(.tint)
             }
         }
+    }
+}
+
+// MARK: - Routes
+
+private extension MapContainerView {
+    /// The chooser and the trip strip, as one surface at the foot of the map.
+    ///
+    /// The strip stays put once routes arrive rather than being replaced by
+    /// them: it holds the only way to clear a destination, and it is where the
+    /// reason for an empty list gets explained.
+    var tripPanel: some View {
+        VStack(spacing: 0) {
+            if !routes.isEmpty {
+                RouteCardsView(routes: routes.map(\.option), selection: $selectedRoute)
+                Divider()
+            }
+
+            tripSummary
+        }
+        .background(.regularMaterial)
+    }
+
+    /// What a set of routes is a function of. Planning restarts when this
+    /// changes, and only then.
+    ///
+    /// Deliberately not the start coordinate itself. CoreLocation delivers a new
+    /// fix every few meters, and re-planning on each one would replace the
+    /// routes under the walker's finger — including, every time, the selection
+    /// they had just made. The arrival of the first fix does have to trigger a
+    /// plan, though, since a destination can be set before there is anywhere to
+    /// route from.
+    struct PlanRequest: Equatable {
+        let destination: Destination.ID?
+        let hasStart: Bool
+    }
+
+    var planRequest: PlanRequest {
+        PlanRequest(destination: destination?.id, hasStart: start != nil)
+    }
+
+    /// Find the routes for the current pair of endpoints, if there is one.
+    func planRoutes() async {
+        guard let destination, let start else {
+            discardRoutes()
+            routingProblem = nil
+            return
+        }
+
+        isRouting = true
+        defer { isRouting = false }
+
+        // Off the main actor, then back: the search is short but not free, and
+        // it is competing with a map the walker is still moving.
+        let graph = graph
+        let plan = await Task.detached(priority: .userInitiated) {
+            RoutePlan(from: start, to: destination.coordinate, in: graph)
+        }.value
+
+        // A newer request cancelled this one — its own result is the current
+        // one, and writing this stale plan over it would win the race by
+        // finishing second.
+        guard !Task.isCancelled else { return }
+
+        switch plan {
+        case .routes(let found):
+            routes = found
+            // The first option is the least hill-averse, which is the closest
+            // thing to what another maps app would have given. Selecting it
+            // makes every other card a visible trade against a familiar answer.
+            selectedRoute = found.first?.id
+            routingProblem = nil
+            frame(coordinates: found.flatMap(\.coordinates))
+
+        case .startOffNetwork:
+            discardRoutes()
+            routingProblem = "There is no walkable street near where you are."
+
+        case .destinationOffNetwork:
+            discardRoutes()
+            routingProblem = "There is no walkable street near that destination."
+
+        case .unreachable:
+            discardRoutes()
+            routingProblem = "No walking route connects those two points."
+        }
+    }
+
+    func discardRoutes() {
+        routes = []
+        selectedRoute = nil
+    }
+
+    /// Drawn thinner and in a receding color, so the routes not taken read as
+    /// context for the selected one rather than as three equal lines.
+    static let alternativeRouteStroke = StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
+    static let selectedRouteStroke = StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
+}
+
+/// A route option with its geometry already resolved.
+///
+/// The map needs a route as coordinates, and the graph stores it as node
+/// indices. Converting once when the route is found, rather than in the view
+/// body, keeps a few hundred lookups per polyline out of every render pass.
+private struct PlannedRoute: Identifiable {
+    let option: RouteOption
+    let coordinates: [CLLocationCoordinate2D]
+
+    var id: RouteOption.ID { option.id }
+}
+
+/// What one planning attempt produced.
+///
+/// The three failures are separated because they call for different responses
+/// from the walker: move, choose somewhere else, or accept that the two points
+/// are not connected by anything walkable.
+private enum RoutePlan {
+    case routes([PlannedRoute])
+    case startOffNetwork
+    case destinationOffNetwork
+    case unreachable
+
+    init(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, in graph: WalkingGraph) {
+        // Both ends are snapped to the network before anything is searched. A
+        // coordinate from CoreLocation or from a search result almost never
+        // lands on a node exactly, and the graph is the only thing that can say
+        // whether "almost" is close enough to route from.
+        guard let origin = graph.nearestNode(toLatitude: start.latitude, longitude: start.longitude) else {
+            self = .startOffNetwork
+            return
+        }
+        guard let goal = graph.nearestNode(toLatitude: destination.latitude, longitude: destination.longitude) else {
+            self = .destinationOffNetwork
+            return
+        }
+
+        let options = RouteOptions.between(start: origin, destination: goal, in: graph)
+        guard !options.isEmpty else {
+            self = .unreachable
+            return
+        }
+
+        self = .routes(
+            options.map { option in
+                PlannedRoute(
+                    option: option,
+                    coordinates: option.nodes.map { node in
+                        CLLocationCoordinate2D(
+                            latitude: graph.latitudes[node],
+                            longitude: graph.longitudes[node]
+                        )
+                    }
+                )
+            }
+        )
     }
 }
 
@@ -384,5 +576,9 @@ private struct CLLocationCoordinate2DFormatter {
 }
 
 #Preview {
-    MapContainerView()
+    if let graph = try? GraphLoader.loadBundledGraph() {
+        MapContainerView(graph: graph)
+    } else {
+        Text("The walking map is missing from this build.")
+    }
 }

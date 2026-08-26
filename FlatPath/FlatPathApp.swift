@@ -42,8 +42,8 @@ struct FlatPathApp: App {
     var body: some Scene {
         WindowGroup {
             switch graph {
-            case .success:
-                MapContainerView()
+            case .success(let graph):
+                MapContainerView(graph: graph)
             case .failure(let error):
                 GraphUnavailableView(error: error)
             }

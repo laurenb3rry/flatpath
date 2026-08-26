@@ -124,3 +124,78 @@ struct WalkingGraph {
         streetNames[Int(edgeNameIndex[edge])]
     }
 }
+
+// MARK: - Lookups
+
+// Two questions the graph gets asked from outside the search: which node a point
+// on the map corresponds to, and which edge joins two nodes of a finished path.
+// Both are graph queries rather than routing ones, and both are asked a handful
+// of times per trip rather than per expansion, so neither carries an index.
+extension WalkingGraph {
+    /// Degrees of latitude to meters. Constant everywhere; the same figure for
+    /// longitude has to be shrunk by the latitude it is measured at.
+    private static let metersPerDegree: Double = 111_320
+
+    /// How far from a point the network may be before the point is treated as
+    /// unroutable. Roughly two city blocks — far enough to forgive a GPS fix
+    /// drifting off the street it was taken on, close enough that a press in the
+    /// middle of the bay or inside a park with no paths is refused rather than
+    /// silently snapped to a shoreline street a quarter mile away.
+    static let snappingLimit: Double = 250
+
+    /// The node nearest a coordinate, or `nil` when the network does not reach
+    /// within `limit` meters of it.
+    ///
+    /// A flat scan of every node. That sounds wasteful against a spatial index,
+    /// but it is a few hundred thousand multiply-adds over arrays already in
+    /// cache — under the noise of the search that follows it — and it means no
+    /// second structure to build at launch and keep consistent with the graph.
+    ///
+    /// Distances come from an equirectangular approximation rather than the
+    /// haversine the router uses. Over the few hundred meters that can win, the
+    /// two disagree by centimeters, and the winner is all that is asked for.
+    func nearestNode(
+        toLatitude latitude: Double,
+        longitude: Double,
+        within limit: Double = snappingLimit
+    ) -> Int? {
+        let metersPerDegreeLatitude = Self.metersPerDegree
+        let metersPerDegreeLongitude = Self.metersPerDegree * cos(latitude * .pi / 180)
+
+        // Seeding the best distance with the limit is what enforces the limit:
+        // a node further away than this can never displace it.
+        var nearest = -1
+        var nearestDistanceSquared = limit * limit
+
+        for node in 0 ..< nodeCount {
+            let northing = (latitudes[node] - latitude) * metersPerDegreeLatitude
+            let easting = (longitudes[node] - longitude) * metersPerDegreeLongitude
+            let distanceSquared = northing * northing + easting * easting
+
+            if distanceSquared < nearestDistanceSquared {
+                nearestDistanceSquared = distanceSquared
+                nearest = node
+            }
+        }
+
+        return nearest < 0 ? nil : nearest
+    }
+
+    /// The edge running from one node to another, or `nil` if they are not
+    /// neighbours. The build emits at most one edge per ordered pair, so the
+    /// first match is the only one.
+    func edge(from origin: Int, to destination: Int) -> Int? {
+        outgoingEdges(of: origin).first { edgeTo[$0] == UInt32(destination) }
+    }
+
+    /// The edges joining each consecutive pair of nodes along a path.
+    ///
+    /// Every route the search returns is a chain of neighbours, so this recovers
+    /// the edges it walked without the search having to carry them. Per-edge
+    /// figures — the walking time and elevation change the cards are built from —
+    /// hang off the edges rather than the nodes, so a path of node indices alone
+    /// cannot be measured.
+    func edges(along path: [Int]) -> [Int] {
+        zip(path, path.dropFirst()).compactMap { edge(from: $0, to: $1) }
+    }
+}

@@ -41,12 +41,26 @@ struct FlatPathApp: App {
 
     var body: some Scene {
         WindowGroup {
-            switch graph {
-            case .success(let graph):
-                MapContainerView(graph: graph)
-            case .failure(let error):
-                GraphUnavailableView(error: error)
+            Group {
+                switch graph {
+                case .success(let graph):
+                    MapContainerView(graph: graph)
+                case .failure(let error):
+                    GraphUnavailableView(error: error)
+                }
             }
+            // Dark unconditionally, not by system preference. The palette is
+            // built on a near-black ground -- the map is dark, the panels laid
+            // over it are barely lighter, and the accent is legible because
+            // there is nothing bright to compete with it. In a light scheme the
+            // same tokens would be an emerald line on white, which is a
+            // different design rather than the same one inverted.
+            .preferredColorScheme(.dark)
+            // Every `.tint` in the view layer resolves to the accent from here,
+            // which is what keeps emerald in one place instead of spelled out
+            // at each of the handful of things allowed to use it.
+            .tint(Theme.accent)
+            .background(Theme.background)
         }
     }
 }
@@ -62,17 +76,22 @@ private struct GraphUnavailableView: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("FlatPath")
-                .font(.title.weight(.semibold))
+                .font(Theme.label(.title, weight: .semibold))
+                .foregroundStyle(Theme.primaryText)
 
             Text("The walking map could not be loaded, so no routes can be found.")
+                .font(Theme.label(.body))
+                .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
 
             Text(String(describing: error))
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.figure(.footnote))
+                .foregroundStyle(Theme.tertiaryText)
                 .multilineTextAlignment(.center)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
     }
 }
 

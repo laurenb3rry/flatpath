@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Only the keys Xcode's Info.plist generator will not write.
+
+  Everything else about this bundle — its name, its version, its orientations,
+  the reason it gives for wanting the walker's location — is set as a build
+  setting and generated, and belongs there rather than here. The generator has
+  no setting for a background mode, because a background mode is a capability
+  rather than a description, so this file exists to carry the one key and is
+  merged with the generated ones at build time.
+-->
+<plist version="1.0">
+<dict>
+	<!--
+	  Turn-by-turn keeps receiving the walker's position with the app off
+	  screen and the phone asleep. Without this the system stops delivering
+	  the moment the app leaves the foreground, and the instruction on screen
+	  quietly becomes whichever corner they were at when they pocketed it.
+
+	  This is the entitlement only. Whether it is actually being used is a
+	  decision made per walk, in the location manager.
+	-->
+	<!--
+	  Lets the app put a walk in progress on the Lock Screen and in the
+	  Dynamic Island. Without this the request for a Live Activity is refused
+	  outright, and turn-by-turn is readable only with the app on screen.
+	-->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
+</dict>
+</plist>

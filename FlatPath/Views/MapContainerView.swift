@@ -30,6 +30,8 @@ struct MapContainerView: View {
     /// because there is no version of this screen that works without it.
     let graph: WalkingGraph
 
+    @Environment(\.displayScale) private var displayScale
+
     @State private var location = LocationManager()
     @State private var search = DestinationSearch()
 
@@ -73,13 +75,25 @@ struct MapContainerView: View {
                 ForEach(routes) { route in
                     if route.id != selectedRoute {
                         MapPolyline(coordinates: route.coordinates)
-                            .stroke(.secondary, style: Self.alternativeRouteStroke)
+                            .stroke(Theme.routeAlternative, style: Theme.Line.stroke(Theme.Line.alternative))
                     }
                 }
 
                 if let selected = routes.first(where: { $0.id == selectedRoute }) {
                     MapPolyline(coordinates: selected.coordinates)
-                        .stroke(.tint, style: Self.selectedRouteStroke)
+                        .stroke(Theme.accent, style: Theme.Line.stroke(Theme.Line.selected))
+
+                    // Only the chosen route is marked for steepness. Warning
+                    // every line at once would say nothing about the choice
+                    // between them, and the walker is comparing routes here --
+                    // what they need to see is which parts of *this* one climb.
+                    ForEach(selected.climbs) { climb in
+                        MapPolyline(coordinates: climb.coordinates)
+                            .stroke(
+                                Theme.warning(for: climb.grade) ?? Theme.accent,
+                                style: Theme.Line.stroke(Theme.Line.warning)
+                            )
+                    }
                 }
 
                 if let start {
@@ -91,6 +105,7 @@ struct MapContainerView: View {
 
                 if let destination {
                     Marker(destination.name, systemImage: "flag.fill", coordinate: destination.coordinate)
+                        .tint(Theme.destination)
                 }
             }
             .mapControls {
@@ -102,11 +117,22 @@ struct MapContainerView: View {
         .safeAreaInset(edge: .top, spacing: 0) { searchPanel }
         .safeAreaInset(edge: .bottom, spacing: 0) { tripPanel }
         .fullScreenCover(item: $navigating) { walk in
-            NavigationView(route: walk.option, graph: graph, location: location) {
+            NavigationView(
+                route: walk.option,
+                graph: graph,
+                location: location,
+                destination: destination?.name ?? "your destination"
+            ) {
                 navigating = nil
             }
         }
-        .task { location.start() }
+        .task {
+            location.start()
+            // Nothing is being walked at this point, so any Live Activity still
+            // standing is left over from a run that was swiped away rather than
+            // ended.
+            LiveNavigation.endOrphans()
+        }
         .task(id: query) { await search.search(matching: query) }
         .task(id: planRequest) { await planRoutes() }
         .onChange(of: location.hasFix) { _, hasFix in
@@ -177,7 +203,7 @@ struct MapContainerView: View {
     /// Move the camera to hold every given point at a readable scale.
     private func frame(coordinates: [CLLocationCoordinate2D]) {
         guard let region = MKCoordinateRegion(containing: coordinates) else { return }
-        withAnimation(.easeInOut(duration: 0.45)) {
+        withAnimation(Theme.Motion.camera) {
             camera = .region(region)
         }
     }
@@ -193,10 +219,12 @@ private extension MapContainerView {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.secondaryText)
 
                 TextField("Search San Francisco", text: $query)
                     .textFieldStyle(.plain)
+                    .font(Theme.label(.body))
+                    .foregroundStyle(Theme.primaryText)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .focused($isSearchFocused)
@@ -208,7 +236,7 @@ private extension MapContainerView {
                         dismissSearch()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.secondaryText)
                     }
                     .buttonStyle(.plain)
                 }
@@ -217,21 +245,32 @@ private extension MapContainerView {
             .padding(.vertical, 10)
 
             if let message = search.message, !query.isEmpty {
-                Divider()
+                hairline
                 Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.label(.footnote))
+                    .foregroundStyle(Theme.secondaryText)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
             }
 
             if !search.results.isEmpty {
-                Divider()
+                hairline
                 resultList
             }
         }
-        .background(.regularMaterial)
+        .background(Theme.surface)
+        .overlay(alignment: .bottom) { hairline }
+    }
+
+    /// A rule a device pixel thick. The panels are separated from the map and
+    /// from each other by these alone -- no borders, no corner radii, no
+    /// shadows -- so that the map keeps the screen and the panels read as edges
+    /// of it rather than as windows floating over it.
+    var hairline: some View {
+        Rectangle()
+            .fill(Theme.hairline)
+            .frame(height: 1 / displayScale)
     }
 
     var resultList: some View {
@@ -243,10 +282,12 @@ private extension MapContainerView {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(result.name)
+                                .font(Theme.label(.body))
+                                .foregroundStyle(Theme.primaryText)
                             if let address = result.address {
                                 Text(address)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .font(Theme.label(.footnote))
+                                    .foregroundStyle(Theme.secondaryText)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -256,7 +297,7 @@ private extension MapContainerView {
                     }
                     .buttonStyle(.plain)
 
-                    Divider().padding(.leading, 12)
+                    hairline.padding(.leading, 12)
                 }
             }
         }
@@ -282,24 +323,28 @@ private extension MapContainerView {
                 symbol: "location.fill",
                 title: "Start",
                 detail: startDetail,
-                isSet: start != nil
+                isSet: start != nil,
+                // The walker's own position, which is the now-marker on the map:
+                // the one endpoint the accent is for.
+                accent: Theme.accent
             )
 
-            Divider()
+            hairline
 
             endpoint(
                 symbol: "flag.fill",
                 title: "Destination",
                 detail: destination.map { $0.address ?? $0.name } ?? "Press and hold the map, or search above",
                 isSet: destination != nil,
+                accent: Theme.destination,
                 trailing: destination == nil ? nil : "Clear",
                 isBusy: isRouting
             )
 
             if let notice = rejectedPin ?? routingProblem {
                 Text(notice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.label(.footnote))
+                    .foregroundStyle(Theme.secondaryText)
             }
         }
         .padding(.horizontal, 16)
@@ -325,22 +370,25 @@ private extension MapContainerView {
         title: String,
         detail: String,
         isSet: Bool,
+        accent: Color,
         trailing: String? = nil,
         isBusy: Bool = false
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol)
-                .font(.caption)
-                .foregroundStyle(isSet ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                .font(Theme.label(.caption))
+                .foregroundStyle(isSet ? accent : Theme.tertiaryText)
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.label(.caption, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                // A set endpoint is a coordinate, which is a figure; an unset
+                // one is a sentence asking for one.
                 Text(detail)
-                    .font(.system(.footnote, design: isSet ? .monospaced : .default))
-                    .foregroundStyle(isSet ? .primary : .secondary)
+                    .font(isSet ? Theme.figure(.footnote) : Theme.label(.footnote))
+                    .foregroundStyle(isSet ? Theme.primaryText : Theme.secondaryText)
             }
 
             Spacer(minLength: 0)
@@ -350,10 +398,12 @@ private extension MapContainerView {
             }
 
             if let trailing {
+                // Not the accent: clearing a destination undoes a choice rather
+                // than making one, and emerald is spoken for.
                 Button(trailing) { clearDestination() }
-                    .font(.footnote)
+                    .font(Theme.label(.footnote))
                     .buttonStyle(.plain)
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(Theme.secondaryText)
             }
         }
     }
@@ -371,14 +421,15 @@ private extension MapContainerView {
         VStack(spacing: 0) {
             if !routes.isEmpty {
                 RouteCardsView(routes: routes.map(\.option), selection: $selectedRoute)
-                Divider()
+                hairline
                 startButton
-                Divider()
+                hairline
             }
 
             tripSummary
         }
-        .background(.regularMaterial)
+        .background(Theme.surface)
+        .overlay(alignment: .top) { hairline }
     }
 
     /// Enters turn-by-turn on the selected route.
@@ -396,13 +447,15 @@ private extension MapContainerView {
             navigating = selected
         } label: {
             Label("Start \(selected?.option.name ?? "")", systemImage: "figure.walk")
-                .font(.subheadline.weight(.semibold))
+                .font(Theme.label(.subheadline, weight: .semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(selected == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+        // Emerald, as the one action that commits to a route -- the same
+        // meaning the accent carries on the line and on the chosen card.
+        .foregroundStyle(selected == nil ? Theme.tertiaryText : Theme.accent)
         .disabled(selected == nil)
     }
 
@@ -449,11 +502,14 @@ private extension MapContainerView {
 
         switch plan {
         case .routes(let found):
-            routes = found
-            // The first option is the least hill-averse, which is the closest
-            // thing to what another maps app would have given. Selecting it
-            // makes every other card a visible trade against a familiar answer.
-            selectedRoute = found.first?.id
+            withAnimation(Theme.Motion.selection) {
+                routes = found
+                // The first option is the least hill-averse, which is the
+                // closest thing to what another maps app would have given.
+                // Selecting it makes every other card a visible trade against a
+                // familiar answer.
+                selectedRoute = found.first?.id
+            }
             routingProblem = nil
             frame(coordinates: found.flatMap(\.coordinates))
 
@@ -476,22 +532,70 @@ private extension MapContainerView {
         selectedRoute = nil
     }
 
-    /// Drawn thinner and in a receding color, so the routes not taken read as
-    /// context for the selected one rather than as three equal lines.
-    static let alternativeRouteStroke = StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
-    static let selectedRouteStroke = StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
 }
 
 /// A route option with its geometry already resolved.
 ///
 /// The map needs a route as coordinates, and the graph stores it as node
 /// indices. Converting once when the route is found, rather than in the view
-/// body, keeps a few hundred lookups per polyline out of every render pass.
+/// body, keeps a few hundred lookups per polyline out of every render pass. The
+/// steep stretches are found in the same pass and for the same reason.
 private struct PlannedRoute: Identifiable {
     let option: RouteOption
     let coordinates: [CLLocationCoordinate2D]
 
+    /// The parts of the route that climb hard enough to be worth marking.
+    let climbs: [Climb]
+
     var id: RouteOption.ID { option.id }
+
+    /// A run of consecutive blocks in the same steepness band.
+    ///
+    /// Runs rather than blocks: a hill is walked as one stretch, and drawing it
+    /// as a dozen separate marks would turn a warning into a dashed line.
+    struct Climb: Identifiable {
+        /// Where the run starts along the route, which is unique within it.
+        let id: Int
+        let grade: Grade
+        let coordinates: [CLLocationCoordinate2D]
+    }
+
+    init(option: RouteOption, coordinates: [CLLocationCoordinate2D], in graph: WalkingGraph) {
+        self.option = option
+        self.coordinates = coordinates
+
+        var climbs: [Climb] = []
+        var runStart: Int?
+        var runGrade = Grade.gentle
+
+        /// Close the run that ends at `position`, if one is open.
+        func closeRun(at position: Int) {
+            guard let start = runStart, runGrade.isWorthWarningAbout else {
+                runStart = nil
+                return
+            }
+            climbs.append(
+                Climb(id: start, grade: runGrade, coordinates: Array(coordinates[start ... position]))
+            )
+            runStart = nil
+        }
+
+        for (position, edge) in option.edges.enumerated() {
+            let grade = Grade(
+                rise: Double(graph.edgeDeltaElevation[edge]),
+                over: Double(graph.edgeLength[edge])
+            )
+
+            if grade != runGrade {
+                closeRun(at: position)
+                runGrade = grade
+                runStart = grade.isWorthWarningAbout ? position : nil
+            }
+        }
+        closeRun(at: option.edges.count)
+
+        self.climbs = climbs
+    }
 }
 
 /// What one planning attempt produced.
@@ -534,7 +638,8 @@ private enum RoutePlan {
                             latitude: graph.latitudes[node],
                             longitude: graph.longitudes[node]
                         )
-                    }
+                    },
+                    in: graph
                 )
             }
         )
@@ -549,10 +654,10 @@ private enum RoutePlan {
 private struct StartMarker: View {
     var body: some View {
         Circle()
-            .fill(.tint)
-            .overlay(Circle().stroke(.background, lineWidth: 3))
+            .fill(Theme.accent)
+            .overlay(Circle().stroke(Theme.background, lineWidth: 3))
             .frame(width: 18, height: 18)
-            .shadow(radius: 2)
+            .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 
@@ -616,6 +721,8 @@ private struct CLLocationCoordinate2DFormatter {
 #Preview {
     if let graph = try? GraphLoader.loadBundledGraph() {
         MapContainerView(graph: graph)
+            .preferredColorScheme(.dark)
+            .tint(Theme.accent)
     } else {
         Text("The walking map is missing from this build.")
     }

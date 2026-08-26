@@ -3,10 +3,18 @@
 //  Wraps CoreLocation: authorization, the current fix used as the default route
 //  start, and the position updates that advance navigation steps.
 //
-//  Location is requested when-in-use only. Routing is something the walker asks
-//  for while looking at the screen, so there is nothing this app would do with a
-//  background fix, and asking for more than it needs is the kind of prompt
-//  people decline.
+//  Location is requested when-in-use only, even though tracking carries on with
+//  the app off screen. That is not a contradiction: when-in-use covers a session
+//  the walker started themselves and can see is running, which is exactly what
+//  turn-by-turn is. Always-authorization would additionally let the app wake
+//  itself to find the walker when nobody asked it to, which this app never does,
+//  and asking for it is the kind of prompt people decline.
+//
+//  Off-screen tracking is switched on for the length of a walk and off again at
+//  the end of it. Left on, the app would hold a location session open for as
+//  long as it was installed; left off, an instruction would stop advancing the
+//  moment the phone went into a pocket, which is where a walker puts it between
+//  one corner and the next.
 //
 //  The app stays usable without a fix. A denied or unavailable location costs
 //  the walker the convenience of a start point they did not have to place
@@ -108,6 +116,58 @@ final class LocationManager: NSObject {
     /// Stop consuming power once no screen needs the walker's position.
     func stop() {
         manager.stopUpdatingLocation()
+    }
+
+    /// Whether a walk is being followed right now, and so whether fixes keep
+    /// arriving with the app off screen.
+    private(set) var isNavigating = false
+
+    /// Keep the walker's position coming while the app is in the background and
+    /// while the screen is asleep.
+    ///
+    /// Three settings together are what make that work, and each fails silently
+    /// in its own way if it is left out. Without the background updates flag the
+    /// system stops delivering the moment the app leaves the screen. Without
+    /// turning off automatic pausing, CoreLocation decides on its own that a
+    /// walker waiting at a long light has finished their trip, and never
+    /// resumes. And the activity type is what tells it these are footsteps, so
+    /// that stopping at a corner is read as part of walking rather than as the
+    /// end of it.
+    ///
+    /// The system shows its own indicator the whole time this is on. That is
+    /// the right trade and it is deliberately not hidden: an app holding a
+    /// location session open in a pocket should be visible from the outside.
+    ///
+    /// Nothing survives the app being swiped out of the app switcher. A walker
+    /// who closes it has ended the walk, and this asks for no permission that
+    /// would let it start itself up again afterwards.
+    func startNavigating() {
+        guard isAuthorized else { return }
+
+        manager.activityType = .fitness
+        manager.pausesLocationUpdatesAutomatically = false
+        manager.allowsBackgroundLocationUpdates = true
+        manager.showsBackgroundLocationIndicator = true
+        manager.startUpdatingLocation()
+
+        isNavigating = true
+        Self.logger.notice("navigation tracking on")
+    }
+
+    /// Give the background session back at the end of a walk.
+    ///
+    /// Updates themselves carry on, because the map screen behind navigation
+    /// still wants a position to route from — what stops is the entitlement to
+    /// keep receiving them with the app off screen.
+    func stopNavigating() {
+        guard isNavigating else { return }
+
+        manager.allowsBackgroundLocationUpdates = false
+        manager.pausesLocationUpdatesAutomatically = true
+        manager.activityType = .other
+
+        isNavigating = false
+        Self.logger.notice("navigation tracking off")
     }
 }
 

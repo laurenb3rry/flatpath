@@ -12,6 +12,13 @@
 //  Steps advance off CoreLocation and nothing else. There is no simulated
 //  progress and no timer: if the walker stops, the instruction stops with them,
 //  and the corner it names stays named until they actually reach it.
+//
+//  This screen is not the only place the walk shows up, and it is not the one
+//  that matters most. A walker pockets the phone between corners, so the same
+//  state is published to a Live Activity -- the Lock Screen and the Dynamic
+//  Island -- and tracking is held open while the app is off screen. What is on
+//  this screen and what is on the Lock Screen are built from one value, so the
+//  two cannot drift apart.
 
 import CoreLocation
 import MapKit
@@ -24,17 +31,31 @@ struct NavigationView: View {
     /// both read the same filtered fix rather than each running their own.
     let location: LocationManager
 
+    /// Where the walk ends, as the walker named it. Shown outside the app,
+    /// where "Flattest" alone would not say which trip is in progress.
+    let destination: String
+
     /// Leave navigation and go back to the routes.
     let onEnd: () -> Void
+
+    @Environment(\.displayScale) private var displayScale
 
     private let coordinates: [CLLocationCoordinate2D]
 
     @State private var follower: ManeuverFollower
     @State private var camera: MapCameraPosition = .automatic
+    @State private var live = LiveNavigation()
 
-    init(route: RouteOption, graph: WalkingGraph, location: LocationManager, onEnd: @escaping () -> Void) {
+    init(
+        route: RouteOption,
+        graph: WalkingGraph,
+        location: LocationManager,
+        destination: String,
+        onEnd: @escaping () -> Void
+    ) {
         self.route = route
         self.location = location
+        self.destination = destination
         self.onEnd = onEnd
         coordinates = route.nodes.map {
             CLLocationCoordinate2D(latitude: graph.latitudes[$0], longitude: graph.longitudes[$0])
@@ -58,7 +79,19 @@ struct NavigationView: View {
         map
             .safeAreaInset(edge: .top, spacing: 0) { banner }
             .safeAreaInset(edge: .bottom, spacing: 0) { footer }
-            .task { follow(fix) }
+            .task {
+                // Tracking carries on with the app off screen for as long as
+                // this screen is up, and both it and the Live Activity are
+                // handed back when it comes down -- including when the walker
+                // ends the walk early.
+                location.startNavigating()
+                live.begin(routeName: route.name, destination: destination, state: published)
+                follow(fix)
+            }
+            .onDisappear {
+                location.stopNavigating()
+                live.end()
+            }
             .onChange(of: fix) { _, moved in follow(moved) }
     }
 
@@ -88,14 +121,15 @@ struct NavigationView: View {
     private func follow(_ fix: Fix?) {
         guard let fix else { return }
 
-        follower.advance(to: fix.coordinate)
+        withAnimation(Theme.Motion.instruction) { follower.advance(to: fix.coordinate) }
+        live.update(published)
 
         // Turned to the heading of the stretch being walked, so that what is
         // ahead on the screen is what is ahead of the walker. Before the first
         // maneuver there is no stretch behind them, so the route's opening
         // heading stands in.
         let heading = follower.underfoot?.bearing ?? follower.pending?.bearing ?? 0
-        withAnimation(.easeInOut(duration: 0.4)) {
+        withAnimation(Theme.Motion.camera) {
             camera = .camera(
                 MapCamera(
                     centerCoordinate: fix.coordinate,
@@ -111,7 +145,7 @@ struct NavigationView: View {
     private var map: some View {
         Map(position: $camera) {
             MapPolyline(coordinates: coordinates)
-                .stroke(.tint, style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
+                .stroke(Theme.accent, style: Theme.Line.stroke(Theme.Line.selected))
 
             // The corner the instruction is talking about, marked so that the
             // sentence and the map are pointing at the same place. Not on the
@@ -125,6 +159,7 @@ struct NavigationView: View {
 
             if let destination = coordinates.last {
                 Marker("Destination", systemImage: "flag.fill", coordinate: destination)
+                    .tint(Theme.destination)
             }
 
             if let fix {
@@ -144,45 +179,100 @@ struct NavigationView: View {
     private var banner: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 14) {
+                // The instruction in hand is the active thing on this screen,
+                // which is what the accent is for.
                 Image(systemName: hasArrived ? "mappin.and.ellipse" : (follower.pending?.symbol ?? "figure.walk"))
                     .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(Theme.accent)
                     .frame(width: 44)
+                    .contentTransition(.symbolEffect(.replace))
 
                 VStack(alignment: .leading, spacing: 3) {
                     if let distance = distanceToManeuver, !hasArrived {
                         Text(distance)
-                            .font(.system(.title2, design: .monospaced).weight(.semibold))
+                            .font(Theme.figure(.title2, weight: .semibold))
+                            .foregroundStyle(Theme.primaryText)
+                            .contentTransition(.numericText())
                     }
 
                     Text(hasArrived ? "You have arrived" : (follower.pending?.instruction ?? "Follow the route"))
-                        .font(.title3.weight(.medium))
+                        .font(Theme.label(.title3, weight: .medium))
+                        .foregroundStyle(Theme.primaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 0)
             }
 
+            if !hasArrived {
+                climbWarning
+            }
+
             if let next = follower.following, !hasArrived {
-                Divider()
+                hairline
                 Text("then \(next.instruction.sentenceContinuation)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.label(.subheadline))
+                    .foregroundStyle(Theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let notice {
-                Divider()
+                hairline
                 Text(notice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.label(.footnote))
+                    .foregroundStyle(Theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial)
+        .background(Theme.surface)
+        .overlay(alignment: .bottom) { hairline }
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(Theme.hairline)
+            .frame(height: 1 / displayScale)
+    }
+
+    /// The steepest climbing grade in the walk immediately around the walker:
+    /// the stretch underfoot and the one about to be turned onto.
+    ///
+    /// Read once and used twice — for the warning on this screen and for the one
+    /// published to the Lock Screen — so the two cannot disagree about the hill
+    /// the walker is standing on.
+    private var steepest: Double {
+        [follower.underfoot, follower.pending]
+            .compactMap { $0?.steepest }
+            .max() ?? 0
+    }
+
+    /// A warning for the steep ground immediately around the walker, when there
+    /// is any.
+    ///
+    /// This is the app's own argument made at the moment it matters: someone who
+    /// chose a route to avoid climbing is owed the grade of the block they are
+    /// on, not only the total once it is behind them.
+    ///
+    /// The stretch underfoot and the one about to be turned onto are both
+    /// considered, and the steeper wins. Warning only about what is ahead would
+    /// take the mark off the screen at the moment the walker started up the very
+    /// block it was warning them about.
+    @ViewBuilder
+    private var climbWarning: some View {
+        if let color = Theme.warning(for: Grade(slope: steepest)) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.forward")
+                    .font(Theme.label(.caption, weight: .bold))
+                Text(WalkingFigures.grade(steepest))
+                    .font(Theme.figure(.caption, weight: .semibold))
+                Text("climb")
+                    .font(Theme.label(.caption))
+            }
+            .foregroundStyle(color)
+        }
     }
 
     /// Meters to the corner ahead, in the same units as the cards. Shown only
@@ -213,30 +303,72 @@ struct NavigationView: View {
                 // A duration is never rounded down to nothing, so standing at
                 // the destination would otherwise be reported as a minute away.
                 Text(hasArrived ? "Arrived" : WalkingFigures.duration(seconds: follower.timeRemaining))
-                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .font(Theme.figure(.title3, weight: .semibold))
+                    .foregroundStyle(Theme.primaryText)
+                    .contentTransition(.numericText())
 
                 HStack(spacing: 6) {
                     Text(WalkingFigures.distance(meters: follower.distanceRemaining))
-                    Text("·").foregroundStyle(.tertiary)
+                    Text("·").foregroundStyle(Theme.tertiaryText)
                     Text(WalkingFigures.climb(meters: follower.climbRemaining))
-                    Text("·").foregroundStyle(.tertiary)
+                    Text("·").foregroundStyle(Theme.tertiaryText)
                     Text(route.name)
+                        .font(Theme.label(.footnote))
                 }
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.figure(.footnote))
+                .foregroundStyle(Theme.secondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             }
 
             Spacer(minLength: 0)
 
+            // Leaving is not the active state, so it is drawn as a way out
+            // rather than as something to press.
             Button("End", role: .cancel, action: onEnd)
-                .buttonStyle(.bordered)
+                .font(Theme.label(.subheadline, weight: .medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.secondaryText)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial)
+        .background(Theme.surface)
+        .overlay(alignment: .top) { hairline }
+    }
+}
+
+// MARK: - Publishing
+
+private extension NavigationView {
+    /// The walk as the Lock Screen and the Dynamic Island show it.
+    ///
+    /// Every figure is formatted here rather than in the extension, and every
+    /// one of them is the same value this screen is displaying — the walker
+    /// glancing at a locked phone is reading the same instruction they would
+    /// see by unlocking it.
+    var published: NavigationAttributes.ContentState {
+        NavigationAttributes.ContentState(
+            instruction: hasArrived
+                ? "You have arrived"
+                : (follower.pending?.instruction ?? "Follow the route"),
+            distanceToManeuver: hasArrived ? nil : distanceToManeuver,
+            symbol: hasArrived ? "mappin.and.ellipse" : (follower.pending?.symbol ?? "figure.walk"),
+            following: hasArrived
+                ? nil
+                : follower.following.map { "then \($0.instruction.sentenceContinuation)" },
+            timeRemaining: WalkingFigures.duration(seconds: follower.timeRemaining),
+            distanceRemaining: WalkingFigures.distance(meters: follower.distanceRemaining),
+            climbRemaining: WalkingFigures.climb(meters: follower.climbRemaining),
+            climb: publishedClimb,
+            hasArrived: hasArrived
+        )
+    }
+
+    var publishedClimb: NavigationAttributes.Climb? {
+        let grade = Grade(slope: steepest)
+        guard grade.isWorthWarningAbout else { return nil }
+        return NavigationAttributes.Climb(grade: grade, percentage: WalkingFigures.grade(steepest))
     }
 }
 
@@ -248,12 +380,12 @@ private struct ManeuverMarker: View {
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.caption.weight(.bold))
-            .foregroundStyle(.background)
+            .font(Theme.label(.caption, weight: .bold))
+            .foregroundStyle(Theme.background)
             .frame(width: 26, height: 26)
-            .background(Circle().fill(.tint))
-            .overlay(Circle().stroke(.background, lineWidth: 2))
-            .shadow(radius: 2)
+            .background(Circle().fill(Theme.accent))
+            .overlay(Circle().stroke(Theme.background, lineWidth: 2))
+            .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 
@@ -262,10 +394,10 @@ private struct ManeuverMarker: View {
 private struct WalkerMarker: View {
     var body: some View {
         Circle()
-            .fill(.tint)
-            .overlay(Circle().stroke(.background, lineWidth: 3))
+            .fill(Theme.accent)
+            .overlay(Circle().stroke(Theme.background, lineWidth: 3))
             .frame(width: 18, height: 18)
-            .shadow(radius: 2)
+            .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 

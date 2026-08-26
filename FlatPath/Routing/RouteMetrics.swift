@@ -102,3 +102,14 @@ extension RouteMetrics {
     var elevationGainText: String { WalkingFigures.climb(meters: elevationGain) }
     var distanceText: String { WalkingFigures.distance(meters: distance) }
 }
+
+extension WalkingFigures {
+    /// A grade as whole percent, for the steepness warnings.
+    ///
+    /// Whole percent because the elevation behind it is sampled at the ends of a
+    /// block: the number is good to a percent or two, and a decimal place would
+    /// claim a precision the raster cannot support.
+    static func grade(_ slope: Double) -> String {
+        "\(Int((slope * 100).rounded()))%"
+    }
+}

@@ -193,6 +193,13 @@ struct ManeuverStep: Identifiable {
     /// Meters climbed over that stretch, descents not counted against it.
     let climb: Double
 
+    /// The steepest climb anywhere in that stretch, as a grade.
+    ///
+    /// The steepest block rather than the average of them: a stretch that is
+    /// flat for three blocks and then rears up has an unremarkable average and a
+    /// block on it the walker needs telling about.
+    let steepest: Double
+
     /// The heading the walker leaves on, degrees clockwise from north. The map
     /// turns to this so that the screen agrees with what is in front of them.
     let bearing: Double
@@ -217,6 +224,9 @@ struct ManeuverStep: Identifiable {
             "Arrive at your destination"
         }
     }
+
+    /// The band the stretch ahead falls in, for the warning that goes with it.
+    var grade: Grade { Grade(slope: steepest) }
 
     var symbol: String {
         switch kind {
@@ -287,6 +297,7 @@ enum Maneuvers {
                 distance: total(\.edgeLength, over: run.segment.positions, of: edges, in: graph),
                 time: total(\.edgeTime, over: run.segment.positions, of: edges, in: graph),
                 climb: climb(over: run.segment.positions, of: edges, in: graph),
+                steepest: steepest(over: run.segment.positions, of: edges, in: graph),
                 bearing: bearings[run.segment.start]
             )
         }
@@ -416,6 +427,7 @@ enum Maneuvers {
             distance: 0,
             time: 0,
             climb: 0,
+            steepest: 0,
             bearing: bearing
         )
     }
@@ -448,6 +460,15 @@ enum Maneuvers {
     /// the walk down the far side does not give back the climb up this one.
     private static func climb(over positions: Range<Int>, of edges: [Int], in graph: WalkingGraph) -> Double {
         positions.reduce(0) { $0 + max(0, Double(graph.edgeDeltaElevation[edges[$1]])) }
+    }
+
+    /// The steepest climbing grade among a run of edges.
+    private static func steepest(over positions: Range<Int>, of edges: [Int], in graph: WalkingGraph) -> Double {
+        positions.reduce(0) { steepest, position in
+            let edge = edges[position]
+            let slope = Double(graph.edgeDeltaElevation[edge]) / max(Double(graph.edgeLength[edge]), 1)
+            return max(steepest, slope)
+        }
     }
 
     // MARK: Geometry

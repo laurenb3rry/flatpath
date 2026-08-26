@@ -172,6 +172,7 @@ struct NavigationView: View {
                 .annotationTitles(.hidden)
             }
         }
+        .mapStyle(Theme.mapStyle)
         .mapControls { MapCompass() }
     }
 
@@ -193,8 +194,9 @@ struct NavigationView: View {
                 allSteps
             }
         }
-        .background(Theme.surface)
-        .overlay(alignment: .bottom) { hairline }
+        .floatingSurface()
+        .padding(.horizontal, Theme.Inset.sheet)
+        .padding(.top, Theme.Inset.sheet)
     }
 
     /// The instruction in hand, and the handle for the rest of them.
@@ -400,8 +402,9 @@ struct NavigationView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .overlay(alignment: .top) { hairline }
+        .floatingSurface()
+        .padding(.horizontal, Theme.Inset.sheet)
+        .padding(.bottom, Theme.Inset.sheet)
     }
 }
 

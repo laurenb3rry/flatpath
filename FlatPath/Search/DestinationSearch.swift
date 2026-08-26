@@ -58,6 +58,21 @@ struct Destination: Identifiable {
     /// Street address, when there is one worth showing alongside the name.
     let address: String?
     let coordinate: CLLocationCoordinate2D
+
+    /// Whether this is somewhere with a name, as opposed to a spot on the map
+    /// known only by its coordinates.
+    ///
+    /// Decides how the detail line under it is set: an address is a sentence
+    /// and belongs in the reading face, a latitude and longitude are figures
+    /// and belong in the monospaced one.
+    let isNamed: Bool
+
+    init(name: String, address: String?, coordinate: CLLocationCoordinate2D, isNamed: Bool = true) {
+        self.name = name
+        self.address = address
+        self.coordinate = coordinate
+        self.isNamed = isNamed
+    }
 }
 
 /// Runs destination queries and holds the results a view lists.
@@ -77,7 +92,10 @@ final class DestinationSearch {
 
     /// Queries shorter than this are not sent. One or two characters match
     /// half the city and cost a round trip to say nothing.
-    private static let shortestUsefulQuery = 3
+    ///
+    /// Visible so that a view can tell the walker why nothing has happened yet
+    /// rather than leaving a field that appears to be ignoring them.
+    static let shortestUsefulQuery = 3
 
     /// How long the typing has to pause before a query is sent. Long enough that
     /// a word typed at speed costs one request instead of one per letter, short

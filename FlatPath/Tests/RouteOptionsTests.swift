@@ -214,4 +214,29 @@ final class RouteOptionsTests: XCTestCase {
         let trip = try XCTUnwrap(Self.trips.first { $0.name == "Across the Mission" })
         XCTAssertEqual(try options(trip).count, 1)
     }
+
+    /// Regression for the trip that exposed the missing neutral baseline. A
+    /// generous detour from Kearny into Nob Hill must offer the direct walk and
+    /// at least one flatter trade, not collapse every hill-aware run into one
+    /// route before the walker gets a choice.
+    func testKearnyToNobHillOffersAChoiceAtGenerousTolerance() throws {
+        let trip = try XCTUnwrap(Self.trips.first { $0.name == "Kearny to Nob Hill" })
+        let offered = try options(trip, tolerance: .generous)
+
+        XCTAssertGreaterThanOrEqual(offered.count, 2)
+        XCTAssertEqual(offered.first?.name, "Direct")
+        XCTAssertEqual(offered.last?.name, "Flattest")
+    }
+
+    /// A generous budget is an explicit request for choice on a substantive
+    /// walk. The only fixture exempted is the deliberately short, flat trip.
+    func testGenerousToleranceOffersAlternativesForSubstantiveTrips() throws {
+        for trip in Self.trips where trip.name != "Across the Mission" {
+            XCTAssertGreaterThanOrEqual(
+                try options(trip, tolerance: .generous).count,
+                2,
+                "\(trip.name): generous tolerance still produced only one path"
+            )
+        }
+    }
 }

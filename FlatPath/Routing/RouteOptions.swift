@@ -103,10 +103,12 @@ enum RouteOptions {
     /// all when one exists; on a trip where it does not, they return something
     /// dominated or something too long, and the filtering drops them unread.
     ///
-    /// Nothing here starts at zero. A walker who does not mind hills is already
-    /// served by every other maps app, and reproducing that route is the thing
-    /// this one exists to offer an alternative to.
+    /// The first run is neutral: it anchors the detour budget to a direct route
+    /// and gives the hill-aware runs something meaningful to improve upon.
     static let sweep: [WalkingCost] = [
+        // The direct baseline anchors the detour budget and gives every flatter
+        // candidate an honest route to trade time against.
+        WalkingCost(uphillSuffering: 0, ascentWeight: 0),
         WalkingCost(uphillSuffering: 0.3, ascentWeight: 2),
         WalkingCost(uphillSuffering: 0.5, ascentWeight: 4),
         WalkingCost(uphillSuffering: 1.0, ascentWeight: 6),
@@ -198,13 +200,62 @@ enum RouteOptions {
     /// every setting finds the same route, which is the correct answer and not a
     /// sign of anything wrong.
     static func candidates(start: Int, destination: Int, in graph: WalkingGraph) -> [Candidate] {
-        (sweep + gradeCeilings).compactMap { cost in
-            guard let route = AStar.route(from: start, to: destination, in: graph, cost: cost) else {
-                return nil
-            }
-            let edges = graph.edges(along: route.nodes)
-            return Candidate(nodes: route.nodes, edges: edges, metrics: RouteMetrics(edges: edges, in: graph))
+        let costs = sweep + gradeCeilings
+        var found = costs.compactMap {
+            candidate(start: start, destination: destination, in: graph, cost: $0)
         }
+
+        // Scalar cost sweeps can all settle on one corridor even when the street
+        // graph contains useful alternatives. Re-run representative preferences
+        // while making the direct corridor temporarily expensive. The surcharge
+        // is search-only: cards still report the route's honest time and climb.
+        if let directEdges = found.first?.edges, !directEdges.isEmpty {
+            let corridor = Set(directEdges)
+            for cost in diversificationCosts {
+                if let alternative = candidate(
+                    start: start,
+                    destination: destination,
+                    in: graph,
+                    cost: cost,
+                    penalizedEdges: corridor
+                ) {
+                    found.append(alternative)
+                }
+            }
+        }
+
+        return found
+    }
+
+    /// Preferences sampled for explicit corridor alternatives. Four extra A*
+    /// runs are enough to cover direct, moderate, strong, and extreme hill
+    /// avoidance without doubling the complete sweep.
+    private static var diversificationCosts: [WalkingCost] {
+        [sweep[0], sweep[3], sweep[6], sweep[sweep.count - 1]]
+    }
+
+    private static func candidate(
+        start: Int,
+        destination: Int,
+        in graph: WalkingGraph,
+        cost: WalkingCost,
+        penalizedEdges: Set<Int> = []
+    ) -> Candidate? {
+        guard let route = AStar.route(
+            from: start,
+            to: destination,
+            in: graph,
+            cost: cost,
+            penalizedEdges: penalizedEdges,
+            edgePenaltyMultiplier: 2.5
+        ) else { return nil }
+
+        let edges = graph.edges(along: route.nodes)
+        return Candidate(
+            nodes: route.nodes,
+            edges: edges,
+            metrics: RouteMetrics(edges: edges, in: graph)
+        )
     }
 
     /// A route found by one run, before anything has decided whether it is worth

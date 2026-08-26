@@ -28,7 +28,7 @@ struct NavigationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: NavigationAttributes.self) { context in
             LockScreenView(attributes: context.attributes, state: context.state)
-                .activityBackgroundTint(Theme.surface)
+                .activityBackgroundTint(Theme.panelBackground)
                 .activitySystemActionForegroundColor(Theme.accent)
         } dynamicIsland: { context in
             DynamicIsland {

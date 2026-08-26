@@ -43,12 +43,15 @@ enum AStar {
         from start: Int,
         to goal: Int,
         in graph: WalkingGraph,
-        cost: WalkingCost
+        cost: WalkingCost,
+        penalizedEdges: Set<Int> = [],
+        edgePenaltyMultiplier: Double = 1
     ) -> Route? {
         precondition(
             (0 ..< graph.nodeCount).contains(start) && (0 ..< graph.nodeCount).contains(goal),
             "route endpoints must be nodes of the graph"
         )
+        precondition(edgePenaltyMultiplier >= 1, "an alternative-route penalty cannot discount edges")
 
         let estimate = RemainingTimeEstimate(goal: goal, in: graph)
 
@@ -93,7 +96,10 @@ enum AStar {
                 // mean never — no detour long enough can outweigh it — and it
                 // leaves the heuristic a lower bound on what remains, since
                 // removing edges can only make a route dearer.
-                guard let step = cost.seconds(of: edge, in: graph) else { continue }
+                guard var step = cost.seconds(of: edge, in: graph) else { continue }
+                if penalizedEdges.contains(edge) {
+                    step *= edgePenaltyMultiplier
+                }
 
                 let throughCurrent = costToReach[current] + step
 

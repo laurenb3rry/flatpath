@@ -116,6 +116,6 @@ private struct RouteCard: View {
     ]
 
     return RouteCardsView(routes: samples, selection: $selection)
-        .background(Theme.surface)
+        .background(Theme.panelBackground)
         .preferredColorScheme(.dark)
 }

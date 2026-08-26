@@ -27,8 +27,7 @@ struct FlatPathApp: App {
                 """
                 loaded graph: \(graph.nodeCount, privacy: .public) nodes, \
                 \(graph.edgeCount, privacy: .public) edges, \
-                \(graph.streetNames.count, privacy: .public) street names, \
-                \(graph.costSettingCount, privacy: .public) cost settings \
+                \(graph.streetNames.count, privacy: .public) street names \
                 in \(elapsed.milliseconds, privacy: .public) ms
                 """
             )

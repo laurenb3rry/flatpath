@@ -16,10 +16,10 @@
 //  has to happen here at the point of entry, while there is still a gesture to
 //  attach the explanation to.
 //
-//  Once both ends exist the routes are found here too, off the main actor: three
-//  searches across a city-sized graph are milliseconds of work, but they are
-//  milliseconds spent between two frames, and the map is being panned while they
-//  run.
+//  Once both ends exist the routes are found here too, off the main actor: a
+//  dozen searches across a city-sized graph are tens of milliseconds of work,
+//  but they are milliseconds spent between two frames, and the map is being
+//  panned while they run.
 
 import CoreLocation
 import MapKit
@@ -55,6 +55,14 @@ struct MapContainerView: View {
     @State private var routes: [PlannedRoute] = []
     @State private var selectedRoute: RouteOption.ID?
     @State private var isRouting = false
+
+    /// How far out of the way the flat options may go.
+    ///
+    /// Deliberately something the walker sets rather than a constant, and
+    /// deliberately not remembered between trips: it is a statement about this
+    /// walk, and the answer for a quick errand is not the answer for a
+    /// deliberate flat walk across town an hour later.
+    @State private var detour: DetourTolerance = .default
 
     /// Why there are no routes, when the reason is worth showing.
     @State private var routingProblem: String?
@@ -561,6 +569,8 @@ private extension MapContainerView {
     var tripPanel: some View {
         VStack(spacing: 0) {
             if !routes.isEmpty {
+                detourControl
+                hairline
                 RouteCardsView(routes: routes.map(\.option), selection: $selectedRoute)
                 hairline
                 startButton
@@ -571,6 +581,31 @@ private extension MapContainerView {
         }
         .background(Theme.surface)
         .overlay(alignment: .top) { hairline }
+    }
+
+    /// How much longer than the most direct option a flatter one may take.
+    ///
+    /// Sits above the cards because it decides what is on them. Widening it can
+    /// turn one option into three -- the flat way round a hill often exists and
+    /// is simply further than the walker had so far said they would go -- and
+    /// narrowing it collapses them back, which is the clearest way to show that
+    /// the choice was there all along and had a price.
+    var detourControl: some View {
+        HStack(spacing: 12) {
+            Text("Detour allowed")
+                .font(Theme.label(.footnote))
+                .foregroundStyle(Theme.secondaryText)
+
+            Picker("Detour allowed", selection: $detour) {
+                ForEach(DetourTolerance.allCases) { tolerance in
+                    Text(tolerance.label).tag(tolerance)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     /// Enters turn-by-turn on the selected route.
@@ -613,10 +648,16 @@ private extension MapContainerView {
         let origin: Destination.ID?
         let destination: Destination.ID?
         let hasStart: Bool
+        let detour: DetourTolerance
     }
 
     var planRequest: PlanRequest {
-        PlanRequest(origin: origin?.id, destination: destination?.id, hasStart: start != nil)
+        PlanRequest(
+            origin: origin?.id,
+            destination: destination?.id,
+            hasStart: start != nil,
+            detour: detour
+        )
     }
 
     /// Find the routes for the current pair of endpoints, if there is one.
@@ -633,8 +674,9 @@ private extension MapContainerView {
         // Off the main actor, then back: the search is short but not free, and
         // it is competing with a map the walker is still moving.
         let graph = graph
+        let detour = detour
         let plan = await Task.detached(priority: .userInitiated) {
-            RoutePlan(from: start, to: destination.coordinate, in: graph)
+            RoutePlan(from: start, to: destination.coordinate, in: graph, detour: detour)
         }.value
 
         // A newer request cancelled this one — its own result is the current
@@ -646,10 +688,10 @@ private extension MapContainerView {
         case .routes(let found):
             withAnimation(Theme.Motion.selection) {
                 routes = found
-                // The first option is the least hill-averse, which is the
-                // closest thing to what another maps app would have given.
-                // Selecting it makes every other card a visible trade against a
-                // familiar answer.
+                // The first option is the most direct one offered, the closest
+                // thing to what another maps app would have given. Selecting it
+                // makes every other card a visible trade against a familiar
+                // answer.
                 selectedRoute = found.first?.id
             }
             routingProblem = nil
@@ -765,7 +807,12 @@ private enum RoutePlan {
     case destinationOffNetwork
     case unreachable
 
-    init(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, in graph: WalkingGraph) {
+    init(
+        from start: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D,
+        in graph: WalkingGraph,
+        detour: DetourTolerance
+    ) {
         // Both ends are snapped to the network before anything is searched. A
         // coordinate from CoreLocation or from a search result almost never
         // lands on a node exactly, and the graph is the only thing that can say
@@ -779,7 +826,9 @@ private enum RoutePlan {
             return
         }
 
-        let options = RouteOptions.between(start: origin, destination: goal, in: graph)
+        let options = RouteOptions.between(
+            start: origin, destination: goal, in: graph, tolerance: detour
+        )
         guard !options.isEmpty else {
             self = .unreachable
             return

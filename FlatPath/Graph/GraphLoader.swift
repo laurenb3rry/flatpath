@@ -7,13 +7,12 @@
 //  The file is a header followed by four fixed-stride sections and one
 //  variable-length one:
 //
-//      header       magic "FPG1" | version | nodeCount | edgeCount
-//                   | nameCount | costCount
+//      header       magic "FPG1" | version | nodeCount | edgeCount | nameCount
 //      nodes        nodeCount x { lat: f64, lon: f64, elevation: f32 }
 //      edgeStart    (nodeCount + 1) x u32, where each node's outgoing edges begin
 //      edges        edgeCount x { from: u32, to: u32, length: f32,
 //                                 deltaElevation: f32, time: f32,
-//                                 costs: costCount x f32, nameIndex: u32 }
+//                                 crossingShare: f32, nameIndex: u32 }
 //      names        nameCount x { byteLength: u16, utf8 }
 //
 //  Everything is little-endian and packed with no padding, so the sections are
@@ -42,7 +41,7 @@ enum GraphLoaderError: Error, CustomStringConvertible {
         case .notAGraphFile(let magic):
             return "not a FlatPath graph: magic was \(magic)"
         case .unsupportedVersion(let version):
-            return "graph format version \(version) is newer than this build understands"
+            return "graph format version \(version) is not the \(GraphLoader.supportedVersion) this build reads"
         case .truncated(let expected, let actual):
             return "graph file is truncated: expected at least \(expected) bytes, got \(actual)"
         case .inconsistentAdjacency(let detail):
@@ -55,14 +54,18 @@ enum GraphLoader {
     static let resourceName = "FlatPathGraph"
     static let resourceExtension = "bin"
 
-    /// The format this build was written against. A file claiming a newer
-    /// version is refused rather than misread: every section offset is computed
-    /// from the header, so a layout change would not fail loudly on its own.
-    static let supportedVersion: UInt32 = 1
+    /// The format this build reads. Exact rather than at-most: an older file
+    /// carried a routing cost per hill-aversion setting where this one carries
+    /// the measurements a cost is computed from, and the two are different
+    /// enough that reading one as the other yields plausible garbage. Every
+    /// section offset comes from the header, so a layout change would not fail
+    /// loudly on its own — the version check is the only thing that catches it.
+    static let supportedVersion: UInt32 = 2
 
     private static let magic: [UInt8] = Array("FPG1".utf8)
-    private static let headerSize = 24
+    private static let headerSize = 20
     private static let nodeStride = 20
+    private static let edgeStride = 28
 
     /// Load the graph bundled with the app.
     static func loadBundledGraph(from bundle: Bundle = .main) throws -> WalkingGraph {
@@ -97,19 +100,17 @@ enum GraphLoader {
         }
 
         let version = bytes.u32(at: 4)
-        guard version <= supportedVersion else {
+        guard version == supportedVersion else {
             throw GraphLoaderError.unsupportedVersion(version)
         }
 
         let nodeCount = Int(bytes.u32(at: 8))
         let edgeCount = Int(bytes.u32(at: 12))
         let nameCount = Int(bytes.u32(at: 16))
-        let costCount = Int(bytes.u32(at: 20))
 
         // Everything but the name table is fixed-stride, so its total size is
         // known before a single record is read. Checking it once here is what
         // lets the per-record reads below skip bounds checks entirely.
-        let edgeStride = 24 + costCount * 4
         let nodesOffset = headerSize
         let edgeStartOffset = nodesOffset + nodeCount * nodeStride
         let edgesOffset = edgeStartOffset + (nodeCount + 1) * 4
@@ -138,11 +139,8 @@ enum GraphLoader {
         var edgeLength = [Float](repeating: 0, count: edgeCount)
         var edgeDeltaElevation = [Float](repeating: 0, count: edgeCount)
         var edgeTime = [Float](repeating: 0, count: edgeCount)
+        var edgeCrossingShare = [Float](repeating: 0, count: edgeCount)
         var edgeNameIndex = [UInt32](repeating: 0, count: edgeCount)
-        var edgeCosts = [[Float]](
-            repeating: [Float](repeating: 0, count: edgeCount),
-            count: costCount
-        )
         for edge in 0 ..< edgeCount {
             // The origin node opens each record but is not kept: the compressed-row
             // `edgeStart` already says which node an edge leaves, and half a
@@ -152,10 +150,8 @@ enum GraphLoader {
             edgeLength[edge] = bytes.f32(at: base + 8)
             edgeDeltaElevation[edge] = bytes.f32(at: base + 12)
             edgeTime[edge] = bytes.f32(at: base + 16)
-            for setting in 0 ..< costCount {
-                edgeCosts[setting][edge] = bytes.f32(at: base + 20 + setting * 4)
-            }
-            edgeNameIndex[edge] = bytes.u32(at: base + 20 + costCount * 4)
+            edgeCrossingShare[edge] = bytes.f32(at: base + 20)
+            edgeNameIndex[edge] = bytes.u32(at: base + 24)
         }
 
         let streetNames = try readNames(bytes, at: namesOffset, count: nameCount)
@@ -169,7 +165,7 @@ enum GraphLoader {
             edgeLength: edgeLength,
             edgeDeltaElevation: edgeDeltaElevation,
             edgeTime: edgeTime,
-            edgeCosts: edgeCosts,
+            edgeCrossingShare: edgeCrossingShare,
             edgeNameIndex: edgeNameIndex,
             streetNames: streetNames
         )

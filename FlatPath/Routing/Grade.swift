@@ -26,25 +26,28 @@ enum Grade: String, Codable, Hashable {
 
     /// Where a climb stops being merely slower and starts being work.
     ///
-    /// The same grade the baked edge costs use as the point at which a hill is
-    /// charged more than the extra time it takes. Below it a block is priced as
-    /// walking; above it the penalty starts compounding, so this is the first
-    /// grade the router itself treats as a hill rather than as ground.
+    /// Drawn a little above the grade at which the router first charges a block
+    /// more than the walking it takes, and deliberately so. These bands are
+    /// marks on a map rather than a cost, and this city has so many blocks just
+    /// past the router's threshold that marking all of them would paint most of
+    /// most routes -- leaving the marks meaning "there is ground here" instead
+    /// of "this is the part that is work".
     static let moderateSlope = 0.05
 
-    /// Where a climb costs twice the walking it takes.
+    /// Where a climb is unmistakably a climb.
     ///
-    /// Read off the middle hill-aversion setting: at that dial the penalty
-    /// doubles a block's cost at a grade of about 12%. Past here the router is
-    /// willing to walk twice as far to avoid the block, which is a fair
-    /// definition of steep for a walker looking at the same block on a map.
+    /// Read off the gentlest setting the router sweeps: even there, a block this
+    /// steep already costs several times the walking it takes, so every route
+    /// option on offer would rather go a long way round than accept one. A grade
+    /// that the most hill-tolerant walker the app will plan for still refuses is
+    /// a fair definition of steep for anyone looking at the block on a map.
     static let steepSlope = 0.12
 
     /// The band a stretch falls in, from its rise and the ground it covers.
     ///
     /// Very short stretches are guarded against: two nodes can sit centimeters
     /// apart, and a real elevation change divided by that is a grade no street
-    /// has. The offline build clamps the same way when it prices an edge.
+    /// has. The router clamps the same way when it prices an edge.
     init(rise: Double, over run: Double) {
         self.init(slope: rise / max(run, Self.shortestMeaningfulRun))
     }

@@ -1,13 +1,13 @@
 """Entry point for the graph build. Run this to produce FlatPathGraph.bin.
 
 Runs the pipeline end to end: read the OSM extract, sample elevations, build
-directed edges with baked costs, serialize, and copy the result into the app so
-the next Xcode build picks it up. Intended to be run on a Mac once, and re-run
-only when the underlying OSM or elevation data is refreshed.
+directed edges with walking times baked in, serialize, and copy the result into
+the app so the next Xcode build picks it up. Intended to be run on a Mac once,
+and re-run only when the underlying OSM or elevation data is refreshed.
 
 The build prints its own vital signs -- node and edge counts, how many nodes
-found no elevation data, the grade distribution, and the known-good reference
-costs recomputed through the same path that baked the real ones. A graph can
+found no elevation data, the grade distribution, and known-good reference walking
+times recomputed through the same path that baked the real ones. A graph can
 serialize perfectly and still be wrong, and these are the numbers that show it.
 """
 
@@ -86,9 +86,9 @@ def main():
     _log(f"  median segment {stats['median_length_m']:.1f}m, steepest grade {stats['max_grade']:.1%}")
     _log(f"  {stats['steep_edge_share']:.1%} of edges steeper than 10%")
 
-    _log("verifying baked costs against known-good values")
-    for label, cost in graph.reference_costs():
-        _log(f"  {label:>13}: {cost:8.1f}s")
+    _log("verifying baked walking times against known-good values")
+    for label, seconds in graph.reference_times():
+        _log(f"  {label:>13}: {seconds:8.1f}s")
 
     _log(f"writing {config.GRAPH_OUTPUT.name}")
     config.GRAPH_OUTPUT.parent.mkdir(parents=True, exist_ok=True)

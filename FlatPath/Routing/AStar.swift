@@ -1,8 +1,12 @@
 //  AStar.swift
 //
-//  Shortest-path search over the directed walking graph, minimizing baked edge
-//  cost in seconds. Each run picks one hill-aversion setting by index; running
+//  Shortest-path search over the directed walking graph, minimizing edge cost in
+//  seconds. Each run carries one walker's idea of what a hill is worth; running
 //  it several times at different settings is what produces the route options.
+//
+//  Costs are computed here, edge by edge, rather than read from a column baked
+//  into the graph. That is what lets a run be parameterized by anything at all
+//  instead of by an index into a fixed handful of settings.
 //
 //  A node is final only when it is popped from the queue, not when it is first
 //  discovered, and the search stops when the destination itself is popped. A
@@ -10,38 +14,37 @@
 
 import Foundation
 
-/// A route the search proved cheapest, at the hill-aversion setting it ran on.
+/// A route the search proved cheapest, at the settings it ran on.
 struct Route {
     /// Node indices from start to destination, both included. Two consecutive
     /// entries are always joined by an edge, which is what lets the map draw
     /// this as a polyline and the maneuver derivation walk it as turns.
     let nodes: [Int]
 
-    /// Total routing cost in seconds — walking time with the hill penalty
+    /// Total routing cost in seconds — walking time with the hill penalties
     /// folded in, not the honest walking time the route cards show. The two
-    /// diverge sharply on steep routes, which is the entire point of the
-    /// penalty, so this number is for comparing routes and nothing else.
+    /// diverge sharply on hilly routes, which is the entire point of the
+    /// penalties, so this number is for comparing routes found at the same
+    /// settings and nothing else. Two runs at different settings produce costs
+    /// on different scales and comparing them across runs is meaningless.
     let cost: Double
 }
 
 enum AStar {
-    /// Cheapest route from `start` to `goal`, or `nil` if the graph has no path
-    /// between them at all.
+    /// Cheapest route from `start` to `goal`, or `nil` if no path between them
+    /// survives `cost`.
     ///
-    /// `setting` selects which baked cost array to minimize: higher settings
-    /// price hills more harshly and bend the route further around them. The
-    /// costs themselves were computed offline, so the choice costs nothing here
-    /// beyond picking a different array to read.
+    /// Two ways that can come back empty, and they mean different things. The
+    /// graph may genuinely not connect the two points; or `cost` may refuse
+    /// enough edges — a grade ceiling does exactly that — to disconnect them for
+    /// this walker while a route still exists for a less particular one. The
+    /// caller decides which of those is worth reporting.
     static func route(
         from start: Int,
         to goal: Int,
         in graph: WalkingGraph,
-        setting: Int
+        cost: WalkingCost
     ) -> Route? {
-        precondition(
-            (0 ..< graph.costSettingCount).contains(setting),
-            "hill-aversion setting \(setting) is outside the \(graph.costSettingCount) the graph was baked with"
-        )
         precondition(
             (0 ..< graph.nodeCount).contains(start) && (0 ..< graph.nodeCount).contains(goal),
             "route endpoints must be nodes of the graph"
@@ -85,7 +88,14 @@ enum AStar {
                 let neighbor = Int(graph.edgeTo[edge])
                 if finalized[neighbor] { continue }
 
-                let throughCurrent = costToReach[current] + Double(graph.cost(of: edge, setting: setting))
+                // A refused edge is not expensive, it is absent. Skipping it
+                // rather than pricing it high is what makes a grade ceiling
+                // mean never — no detour long enough can outweigh it — and it
+                // leaves the heuristic a lower bound on what remains, since
+                // removing edges can only make a route dearer.
+                guard let step = cost.seconds(of: edge, in: graph) else { continue }
+
+                let throughCurrent = costToReach[current] + step
 
                 // Strictly cheaper, not merely equal: on a street grid many
                 // routes tie exactly, and rewriting the predecessor on a tie

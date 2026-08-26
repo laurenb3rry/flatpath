@@ -42,9 +42,13 @@ struct GraphEdge {
 /// The whole walking network, as parallel arrays indexed by node or edge.
 ///
 /// Every per-node and per-edge attribute lives in its own contiguous array
-/// rather than in an array of structs. A* touches `edgeStart`, `edgeTo` and one
-/// cost array and nothing else, so keeping those three dense means a traversal
-/// pulls in only the bytes it actually reads.
+/// rather than in an array of structs. A traversal touches `edgeStart`,
+/// `edgeTo`, and the four measurements a cost is computed from, so keeping each
+/// of them dense means it pulls in only the bytes it actually reads.
+///
+/// What the edges carry are measurements, not costs. A routing cost is built
+/// from them at the moment an edge is expanded, so that how a hill is priced can
+/// change without rebuilding the file this loads from.
 ///
 /// Adjacency is a compressed-row layout: edges are sorted by origin node, and
 /// `edgeStart` records where each node's run begins. The outgoing edges of node
@@ -72,9 +76,12 @@ struct WalkingGraph {
     let edgeDeltaElevation: [Float]
     /// Seconds, hill penalty excluded.
     let edgeTime: [Float]
-    /// One array per hill-aversion setting, in increasing order of aversion.
-    /// Routing picks an array up front and reads only that one for the whole run.
-    let edgeCosts: [[Float]]
+    /// This segment's share of one street crossing: 1 for a crossing mapped as a
+    /// single segment, a fraction for one split by a traffic island, 0 for
+    /// everything that is not a crossing. The router charges the wait at a light
+    /// once per crossing, and this is what keeps a finely drawn crossing from
+    /// costing more than a coarsely drawn one.
+    let edgeCrossingShare: [Float]
     let edgeNameIndex: [UInt32]
 
     /// Street names, interned. Thousands of edges share a handful of names, so
@@ -83,20 +90,11 @@ struct WalkingGraph {
 
     var nodeCount: Int { latitudes.count }
     var edgeCount: Int { edgeTo.count }
-    /// How many hill-aversion settings the graph was baked with. Routing sweeps
-    /// all of them to produce its route options.
-    var costSettingCount: Int { edgeCosts.count }
 
     /// Indices of the edges leaving `node`.
     @inline(__always)
     func outgoingEdges(of node: Int) -> Range<Int> {
         Int(edgeStart[node]) ..< Int(edgeStart[node + 1])
-    }
-
-    /// Routing cost in seconds for `edge` at hill-aversion `setting`.
-    @inline(__always)
-    func cost(of edge: Int, setting: Int) -> Float {
-        edgeCosts[setting][edge]
     }
 
     func node(at index: Int) -> GraphNode {

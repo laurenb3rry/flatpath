@@ -1,8 +1,20 @@
-"""Tunable constants for the graph build: cost-function parameters, the area to
-cover, and where the input and output files live.
+"""Tunable constants for the graph build: cost-function shape, the area to cover,
+and where the input and output files live.
 
-The cost constants below are tuned. Changing them changes every baked edge cost,
-so the graph must be rebuilt and the app's bundled binary replaced.
+The graph ships the ingredients of a cost rather than a cost. Length, elevation
+change and honest walking time are measured here, once; the router multiplies
+them into a routing cost on the phone, every time it expands an edge. So the
+constants below fall into two kinds, and only one kind lives in this file.
+
+What is baked -- geometry, elevation, walking time -- depends on the constants
+here, and changing any of them means rebuilding the graph and replacing the
+binary the app carries. What is not baked -- how much a grade is minded, what a
+meter of climb is worth, what a crossing costs -- is decided on the phone and
+lives with the router, where it can be changed without a rebuild.
+
+The misery constants sit here anyway, because the cost function they belong to is
+stated in cost.py and pinned by its tests. The router carries the same numbers.
+The two must be changed together.
 """
 
 from pathlib import Path
@@ -10,21 +22,17 @@ from pathlib import Path
 # --- Cost function ---
 
 # Grade above which climbing starts to feel like suffering rather than walking.
-# Below 5%, a hill costs only the extra time it takes; above it, misery compounds.
-UPHILL_MISERY_GRADE = 0.05
+# Below it a hill costs only the extra time it takes; above it, misery compounds.
+#
+# San Francisco is full of 3-5% blocks. Set at 5% they were all free, and a route
+# could climb a couple of hundred feet at a steady 4% without the router pricing
+# any of it -- flat, by the cost function, and a real climb to the walker. 3% is
+# the point below which a grade genuinely reads as level ground here.
+UPHILL_MISERY_GRADE = 0.03
 
 # Grade above which descending starts to punish the knees. Much higher than the
 # uphill threshold: gentle descents are free, only genuinely steep ones hurt.
 DOWNHILL_MISERY_GRADE = 0.20  # TUNE: validate against SF's steep descents
-
-# How strongly to penalize excess uphill grade. One cost is baked per value, in
-# this order, giving three routes of increasing hill-aversion: the app runs the
-# router once per index and offers the distinct survivors as route options.
-#
-# Never add 0.0 to this list. At zero the router degenerates into a pure
-# shortest-time search -- the same route Google Maps gives, straight over the
-# hill -- which is the thing this app exists to avoid. 0.15 is the floor.
-UPHILL_SUFFERING = [0.15, 0.5, 1.5]
 
 # How strongly to penalize excess downhill grade. Lower than any uphill value:
 # steep descents are unpleasant, but never as costly as the equivalent climb.
@@ -37,28 +45,9 @@ DOWNHILL_SUFFERING = 0.15
 MAX_SPEED_MS = 1.667
 
 
-# Seconds added to the routing cost of crossing a street.
-#
-# Both sides of most SF streets are mapped as their own sidewalks, joined by
-# marked crossings. Priced at nothing, a crossing is free, so the router will
-# hop the street to save a couple of meters and hop back at the next corner --
-# technically optimal, and useless to a walker who has to wait at two lights to
-# collect the saving. This is what a crossing actually costs: the wait at the
-# signal and the interruption, rather than the seconds spent walking it.
-#
-# Sized between the two mistakes. Well above the few seconds a pointless
-# side-swap saves, so those stop happening; well below the ~70 seconds it takes
-# to walk a block, so the router still crosses when crossing is genuinely the
-# way there instead of walking around the long side of a block to avoid it.
-#
-# Charged once per crossing rather than once per segment: a crossing broken in
-# two by a traffic island is still one crossing, and would otherwise cost double
-# for being mapped in more detail.
-CROSSING_PENALTY_S = 25.0  # TUNE: walk a few real crossings and see
-
-# Route cards keep reporting pure walking time. This is a cost, not a duration --
-# the same treatment the hill penalty gets, and for the same reason: it steers
-# the route without misreporting how long the walk takes.
+# Route cards report pure walking time, so nothing that steers a route -- not the
+# hill penalty, not the wait at a crossing -- is allowed into the time this file
+# bakes. Both are costs, not durations, and both are applied by the router.
 
 
 # --- Coverage ---

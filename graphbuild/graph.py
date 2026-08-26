@@ -1,4 +1,4 @@
-"""Turns parsed ways and node elevations into a directed graph with baked costs.
+"""Turns parsed ways and node elevations into a directed graph of measured edges.
 
 Every walkable segment becomes two edges, one per direction. This is not
 optional: slope is signed, so uphill and downhill over the same ground cost
@@ -12,8 +12,10 @@ that follow the actual bend of a street, and elevation change measured where it
 happens instead of averaged across a whole block.
 
 Each edge stores its length, its elevation change, its honest walking time, and
-one cost per hill-aversion setting. Baking every cost here means the app picks a
-route flavor by array index and never evaluates the cost function at all.
+whether it is part of a street crossing. Those are measurements, and they are all
+that is baked: the routing cost built out of them is computed on the phone, so
+the dials that decide how much a hill is minded can be retuned without rebuilding
+this file's output and reshipping it.
 
 Edges come out sorted by origin node, with an index of where each node's edges
 begin. That ordering is what lets the app walk a node's neighbors as a
@@ -25,12 +27,10 @@ import math
 import numpy as np
 
 from config import (
-    CROSSING_PENALTY_S,
     MAX_ABS_SLOPE,
     MIN_SLOPE_LENGTH_M,
-    UPHILL_SUFFERING,
 )
-from cost import edge_cost, tobler_time_s
+from cost import tobler_time_s
 
 _EARTH_RADIUS_M = 6_371_008.8
 
@@ -111,11 +111,16 @@ def _segment_pairs(ways):
     doubles back on itself, would otherwise produce parallel edges that cost the
     router time to expand and can never be better than each other.
 
-    Each segment also carries its share of a crossing, which is what the crossing
-    penalty is later multiplied by. A crossing way mapped as one segment carries
-    all of it; one broken in two by a traffic island carries half in each piece,
-    so a walker pays for crossing the street once however finely the crossing
-    happens to be drawn. Everything that is not a crossing carries zero.
+    Each segment also carries its share of a crossing, which the router later
+    multiplies by what it thinks a crossing costs. A crossing way mapped as one
+    segment carries all of it; one broken in two by a traffic island carries half
+    in each piece, so a walker pays for crossing the street once however finely
+    the crossing happens to be drawn. Everything that is not a crossing carries
+    zero.
+
+    A share rather than a flag, because the cost of waiting at a light is charged
+    per crossing and not per segment, and only the build can tell how many
+    segments one crossing was drawn as.
     """
     seen = set()
     from_nodes = []
@@ -146,9 +151,9 @@ def build(lats, lons, elevations, ways):
     """Build the directed edge table.
 
     Returns a dict of parallel arrays: `from_node`, `to_node`, `length_m`,
-    `delta_elev_m`, `time_s`, `costs` (one row per hill-aversion setting), and
-    `name_index` into the returned `names` list, plus `edge_start`, the offset
-    where each node's outgoing edges begin.
+    `delta_elev_m`, `time_s`, `crossing_share`, and `name_index` into the
+    returned `names` list, plus `edge_start`, the offset where each node's
+    outgoing edges begin.
     """
     lats = np.asarray(lats, dtype=np.float64)
     lons = np.asarray(lons, dtype=np.float64)
@@ -193,26 +198,10 @@ def build(lats, lons, elevations, ways):
         for l, d in zip(slope_length, effective_rise)
     ])
 
-    costs = np.array([
-        [
-            edge_cost(float(l), float(d), suffering)
-            for l, d in zip(slope_length, effective_rise)
-        ]
-        for suffering in UPHILL_SUFFERING
-    ])
-
     # Walking time must reflect the real distance even where slope was clamped,
     # otherwise a long flat edge and a short one would report the same duration.
     time_scale = length_m / slope_length
     time_s = time_s * time_scale
-    costs = costs * time_scale
-
-    # The wait to cross, added to the routing cost and to nothing else. Walking
-    # time on the cards stays what a clock would measure, the same way the hill
-    # penalty is kept out of it -- both steer the route without misstating how
-    # long the walk takes. Being additive and never negative, it also leaves the
-    # router's heuristic a lower bound, so routes stay provably optimal.
-    costs = costs + CROSSING_PENALTY_S * crossing_share
 
     name_index, names = _intern_names(segment_names * 2)
 
@@ -224,7 +213,7 @@ def build(lats, lons, elevations, ways):
         "length_m": length_m[order].astype(np.float32),
         "delta_elev_m": delta_elev_m[order].astype(np.float32),
         "time_s": time_s[order].astype(np.float32),
-        "costs": costs[:, order].astype(np.float32),
+        "crossing_share": crossing_share[order].astype(np.float32),
         "name_index": np.asarray(name_index, dtype=np.uint32)[order],
     }
     edges["edge_start"] = _edge_offsets(edges["from_node"], len(lats))
@@ -267,19 +256,21 @@ def _edge_offsets(from_node, node_count):
     return offsets
 
 
-def reference_costs():
-    """Recompute the known-good edge costs using this module's baking path.
+def reference_times():
+    """Recompute known-good walking times using this module's baking path.
 
     A build can produce a well-formed file full of wrong numbers. Running the
-    same clamps and cost calls the pipeline uses against edges whose answers are
-    known is the cheapest way to catch that before the graph ships.
+    same clamps and the same call the pipeline uses against edges whose answers
+    are known is the cheapest way to catch that before the graph ships.
+
+    Walking time is the only figure derived from a curve rather than measured, so
+    it is the only one that can be wrong in a way the file itself would not show.
     """
-    suffering = 0.5
     checks = []
     for label, rise in (("flat", 0.0), ("normal climb", 6.0), ("steep climb", 18.0)):
         length = 100.0
         slope = max(-MAX_ABS_SLOPE, min(MAX_ABS_SLOPE, rise / max(length, MIN_SLOPE_LENGTH_M)))
-        checks.append((label, edge_cost(length, slope * length, suffering)))
+        checks.append((label, tobler_time_s(length, slope * length)))
     return checks
 
 

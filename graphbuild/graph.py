@@ -24,7 +24,12 @@ import math
 
 import numpy as np
 
-from config import MAX_ABS_SLOPE, MIN_SLOPE_LENGTH_M, UPHILL_SUFFERING
+from config import (
+    CROSSING_PENALTY_S,
+    MAX_ABS_SLOPE,
+    MIN_SLOPE_LENGTH_M,
+    UPHILL_SUFFERING,
+)
 from cost import edge_cost, tobler_time_s
 
 _EARTH_RADIUS_M = 6_371_008.8
@@ -58,7 +63,7 @@ def largest_connected_component(lats, lons, ways):
     """
     node_count = len(lats)
     neighbors = [[] for _ in range(node_count)]
-    for indices, _name in ways:
+    for indices, _name, _crossing in ways:
         for a, b in zip(indices, indices[1:]):
             if a == b:
                 continue
@@ -89,9 +94,9 @@ def largest_connected_component(lats, lons, ways):
     renumbered[keep] = np.arange(int(keep.sum()))
 
     kept_ways = []
-    for indices, name in ways:
+    for indices, name, crossing in ways:
         if keep[indices[0]]:
-            kept_ways.append(([int(renumbered[i]) for i in indices], name))
+            kept_ways.append(([int(renumbered[i]) for i in indices], name, crossing))
 
     kept_lats = [lat for lat, k in zip(lats, keep) if k]
     kept_lons = [lon for lon, k in zip(lons, keep) if k]
@@ -105,13 +110,23 @@ def _segment_pairs(ways):
     Pairs are deduplicated: two ways sharing a stretch of geometry, or a way that
     doubles back on itself, would otherwise produce parallel edges that cost the
     router time to expand and can never be better than each other.
+
+    Each segment also carries its share of a crossing, which is what the crossing
+    penalty is later multiplied by. A crossing way mapped as one segment carries
+    all of it; one broken in two by a traffic island carries half in each piece,
+    so a walker pays for crossing the street once however finely the crossing
+    happens to be drawn. Everything that is not a crossing carries zero.
     """
     seen = set()
     from_nodes = []
     to_nodes = []
     names = []
+    crossing_shares = []
 
-    for indices, name in ways:
+    for indices, name, is_crossing in ways:
+        segments = max(1, len(indices) - 1)
+        share = 1.0 / segments if is_crossing else 0.0
+
         for a, b in zip(indices, indices[1:]):
             if a == b:
                 continue
@@ -122,8 +137,9 @@ def _segment_pairs(ways):
             from_nodes.append(a)
             to_nodes.append(b)
             names.append(name)
+            crossing_shares.append(share)
 
-    return from_nodes, to_nodes, names
+    return from_nodes, to_nodes, names, crossing_shares
 
 
 def build(lats, lons, elevations, ways):
@@ -138,9 +154,10 @@ def build(lats, lons, elevations, ways):
     lons = np.asarray(lons, dtype=np.float64)
     elevations = np.asarray(elevations, dtype=np.float64)
 
-    a_nodes, b_nodes, segment_names = _segment_pairs(ways)
+    a_nodes, b_nodes, segment_names, crossing_shares = _segment_pairs(ways)
     a_nodes = np.asarray(a_nodes, dtype=np.int64)
     b_nodes = np.asarray(b_nodes, dtype=np.int64)
+    crossing_shares = np.asarray(crossing_shares, dtype=np.float64)
 
     lengths = _haversine_m(lats[a_nodes], lons[a_nodes], lats[b_nodes], lons[b_nodes])
 
@@ -150,6 +167,7 @@ def build(lats, lons, elevations, ways):
     b_nodes = b_nodes[keeps]
     lengths = lengths[keeps]
     segment_names = [n for n, keep in zip(segment_names, keeps) if keep]
+    crossing_shares = crossing_shares[keeps]
 
     rises = elevations[b_nodes] - elevations[a_nodes]
 
@@ -159,6 +177,8 @@ def build(lats, lons, elevations, ways):
     to_node = np.concatenate([b_nodes, a_nodes])
     length_m = np.concatenate([lengths, lengths])
     delta_elev_m = np.concatenate([rises, -rises])
+    # A crossing costs the same whichever way it is walked.
+    crossing_share = np.concatenate([crossing_shares, crossing_shares])
 
     # Slope gets a floor on length and a ceiling on magnitude; distance and
     # elevation change are reported unmodified. Guarding the ratio rather than
@@ -186,6 +206,13 @@ def build(lats, lons, elevations, ways):
     time_scale = length_m / slope_length
     time_s = time_s * time_scale
     costs = costs * time_scale
+
+    # The wait to cross, added to the routing cost and to nothing else. Walking
+    # time on the cards stays what a clock would measure, the same way the hill
+    # penalty is kept out of it -- both steer the route without misstating how
+    # long the walk takes. Being additive and never negative, it also leaves the
+    # router's heuristic a lower bound, so routes stay provably optimal.
+    costs = costs + CROSSING_PENALTY_S * crossing_share
 
     name_index, names = _intern_names(segment_names * 2)
 

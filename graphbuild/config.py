@@ -37,6 +37,30 @@ DOWNHILL_SUFFERING = 0.15
 MAX_SPEED_MS = 1.667
 
 
+# Seconds added to the routing cost of crossing a street.
+#
+# Both sides of most SF streets are mapped as their own sidewalks, joined by
+# marked crossings. Priced at nothing, a crossing is free, so the router will
+# hop the street to save a couple of meters and hop back at the next corner --
+# technically optimal, and useless to a walker who has to wait at two lights to
+# collect the saving. This is what a crossing actually costs: the wait at the
+# signal and the interruption, rather than the seconds spent walking it.
+#
+# Sized between the two mistakes. Well above the few seconds a pointless
+# side-swap saves, so those stop happening; well below the ~70 seconds it takes
+# to walk a block, so the router still crosses when crossing is genuinely the
+# way there instead of walking around the long side of a block to avoid it.
+#
+# Charged once per crossing rather than once per segment: a crossing broken in
+# two by a traffic island is still one crossing, and would otherwise cost double
+# for being mapped in more detail.
+CROSSING_PENALTY_S = 25.0  # TUNE: walk a few real crossings and see
+
+# Route cards keep reporting pure walking time. This is a cost, not a duration --
+# the same treatment the hill penalty gets, and for the same reason: it steers
+# the route without misreporting how long the walk takes.
+
+
 # --- Coverage ---
 
 # The area the graph covers, as (west, south, east, north) in degrees. Roughly

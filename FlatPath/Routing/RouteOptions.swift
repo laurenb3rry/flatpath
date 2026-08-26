@@ -3,10 +3,20 @@
 //  Produces the handful of routes shown to the walker.
 //
 //  Runs the search once per hill-aversion setting, then filters the results:
-//  candidates that overlap an already-kept route too heavily are dropped, and so
-//  are ones that detour far beyond the quickest survivor. Short trips legitimately
-//  collapse to a single option -- offering one honest route beats padding the
-//  list with near-duplicates.
+//  candidates that overlap an already-kept route too heavily are dropped, so are
+//  ones that detour far beyond the quickest survivor, and so are ones that ask
+//  the walker to pay more and get less. Short trips legitimately collapse to a
+//  single option -- offering one honest route beats padding the list with
+//  near-duplicates.
+//
+//  The last of those filters is what keeps the names truthful. The router prices
+//  steepness rather than total climb: the misery multiplier grows with how far a
+//  block exceeds a comfortable grade, so a high hill-aversion setting will
+//  happily accept a few more meters of cumulative climb to keep every block
+//  gentle. That is the right thing to optimize -- a 12% block is what hurts, not
+//  the arithmetic sum of every rise on the way -- but it is not what the card
+//  says. The card leads with total gain, so a route offered beside a quicker one
+//  has to beat it on total gain, or it is not a trade the walker can see.
 
 import Foundation
 
@@ -38,6 +48,23 @@ enum RouteOptions {
     /// are not a choice, they are clutter. Lowering this returns fewer, more
     /// clearly distinct options; raising it starts offering near-copies.
     static let duplicateOverlap = 0.85  // TUNE
+
+    /// How much climb a slower option has to save, in meters, for every extra
+    /// minute it asks for.
+    ///
+    /// Roughly ten feet of climb per minute, which is where the alternatives
+    /// this city actually produces separate into two kinds.
+    ///
+    /// Measured rather than reasoned: across a dozen SF trips, the alternatives
+    /// worth having came in at four to six meters of climb saved per extra
+    /// minute, and the ones that were not worth having came in at one or less.
+    /// Nothing landed in between. The line sits in that gap, so a real
+    /// alternative survives and three cards reading 315, 310 and 305 feet — the
+    /// same walk described three times — do not.
+    ///
+    /// Raising this offers fewer and more sharply different routes; lowering it
+    /// starts padding the list with distinctions the walker cannot act on.
+    static let worthwhileClimbPerMinute = 3.0  // TUNE
 
     /// How much longer than the quickest surviving route another one may take.
     ///
@@ -96,7 +123,42 @@ enum RouteOptions {
         // The quickest survivor sets the bar and always clears it, so this can
         // never empty a non-empty list.
         guard let quickest = kept.map(\.metrics.time).min() else { return [] }
-        return kept.filter { $0.metrics.time <= quickest * detourAllowance }
+        let withinReach = kept.filter { $0.metrics.time <= quickest * detourAllowance }
+
+        return worthOffering(withinReach)
+    }
+
+    /// The routes that are actually a choice, quickest first.
+    ///
+    /// Every card after the first costs the walker time, so it has to give
+    /// something back: enough less climbing to be worth the minutes, measured
+    /// against the flattest route kept so far rather than against the one beside
+    /// it. That single rule covers both ways the list goes wrong. A route that
+    /// is slower *and* climbs more gives back nothing at all and is dropped, and
+    /// so is one whose saving is too slight to act on.
+    ///
+    /// Time and climb are the axes, and distance deliberately is not: a longer
+    /// way round that climbs less is exactly the trade this app exists to offer.
+    private static func worthOffering(_ routes: [RouteOption]) -> [RouteOption] {
+        var offered: [RouteOption] = []
+
+        for candidate in routes.sorted(by: { $0.metrics.time < $1.metrics.time }) {
+            guard let flattestSoFar = offered.last else {
+                // The quickest route is always worth showing: it is the one the
+                // walker is being offered alternatives to.
+                offered.append(candidate)
+                continue
+            }
+
+            let minutesCost = (candidate.metrics.time - flattestSoFar.metrics.time) / 60
+            let climbSaved = flattestSoFar.metrics.elevationGain - candidate.metrics.elevationGain
+
+            if climbSaved >= minutesCost * worthwhileClimbPerMinute {
+                offered.append(candidate)
+            }
+        }
+
+        return offered
     }
 
     /// The share of a candidate's edges that an already-kept route also uses.

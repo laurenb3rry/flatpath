@@ -221,7 +221,7 @@ def fill_gaps(elevations, ways):
 def _adjacency(ways, node_count):
     """Neighbor lists keyed by node index, built from way node sequences."""
     neighbors = [[] for _ in range(node_count)]
-    for indices, _name in ways:
+    for indices, _name, _crossing in ways:
         for a, b in zip(indices, indices[1:]):
             if a == b:
                 continue

@@ -40,6 +40,11 @@ WALKABLE_HIGHWAYS = frozenset({
     "track",
 })
 
+# Way types that carry a walker across traffic rather than alongside it. These
+# are priced separately when edges are built, because what a crossing costs is
+# mostly the wait to use it, which has nothing to do with its length.
+CROSSING_FOOTWAYS = frozenset({"crossing"})
+
 # Tag values that revoke walking access on a way that would otherwise qualify.
 _FOOT_DENIED = frozenset({"no", "private"})
 _ACCESS_DENIED = frozenset({"no", "private"})
@@ -93,9 +98,10 @@ def _collect_nodes(pbf_path, bbox):
 def _collect_ways(pbf_path, nodes):
     """Walkable ways, trimmed to the parts whose nodes are in `nodes`.
 
-    Returns (osm_node_id_sequence, street_name) pairs. A way that leaves the box
-    and comes back contributes each inside run separately, because the router
-    must not be able to travel along a stretch whose geometry is missing.
+    Returns (osm_node_id_sequence, street_name, is_crossing) triples. A way that
+    leaves the box and comes back contributes each inside run separately, because
+    the router must not be able to travel along a stretch whose geometry is
+    missing.
     """
     ways = []
     way_filter = osmium.filter.KeyFilter("highway", "sidewalk")
@@ -106,6 +112,7 @@ def _collect_ways(pbf_path, nodes):
             continue
 
         name = tags.get("name")
+        crossing = tags.get("footway") in CROSSING_FOOTWAYS
 
         run = []
         for node_ref in way.nodes:
@@ -114,10 +121,10 @@ def _collect_ways(pbf_path, nodes):
                 run.append(node_id)
             else:
                 if len(run) >= 2:
-                    ways.append((run, name))
+                    ways.append((run, name, crossing))
                 run = []
         if len(run) >= 2:
-            ways.append((run, name))
+            ways.append((run, name, crossing))
 
     return ways
 
@@ -126,7 +133,8 @@ def parse(pbf_path, bbox):
     """Extract the walkable network inside `bbox` from an OSM extract.
 
     Returns (lats, lons, ways) where lats and lons are parallel lists indexed by
-    dense node index, and each way is (node_index_sequence, street_name).
+    dense node index, and each way is (node_index_sequence, street_name,
+    is_crossing).
 
     Nodes that no surviving way touches are dropped and the rest are renumbered,
     so the returned indices are contiguous from zero. Everything downstream --
@@ -141,7 +149,7 @@ def parse(pbf_path, bbox):
     lons = []
     ways = []
 
-    for node_ids, name in osm_ways:
+    for node_ids, name, crossing in osm_ways:
         indices = []
         for node_id in node_ids:
             index = index_of.get(node_id)
@@ -152,6 +160,6 @@ def parse(pbf_path, bbox):
                 lats.append(lat)
                 lons.append(lon)
             indices.append(index)
-        ways.append((indices, name))
+        ways.append((indices, name, crossing))
 
     return lats, lons, ways

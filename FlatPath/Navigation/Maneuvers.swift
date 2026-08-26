@@ -384,23 +384,38 @@ enum Maneuvers {
         /// against the edge that runs into it.
         var reference: Double?
 
-        for segment in segments.dropFirst() {
+        for position in segments.indices.dropFirst() {
+            let segment = segments[position]
             let incoming = reference ?? bearings[segment.start - 1]
             let turn = Turn(bearingChange: change(from: incoming, to: bearings[segment.start]))
 
             let previous = announced[announced.count - 1].segment
             let renamed = segment.street != nil && segment.street != previous.street
-            let isConnector =
-                segment.street == nil
-                && total(\.edgeLength, over: segment.positions, of: edges, in: graph) < minimumStretch
+            let isBrief =
+                total(\.edgeLength, over: segment.positions, of: edges, in: graph) < minimumStretch
 
-            guard turn != nil || renamed, !isConnector else {
+            // An unnamed hop too short to act on: the jog across an intersection.
+            let isConnector = segment.street == nil && isBrief
+
+            // A named one that the walk immediately comes back from is the same
+            // thing wearing a street sign. Rounding a corner at a wide junction
+            // clips the cross street for a few paces, and announcing it as a
+            // turn onto that street -- followed a moment later by a turn back --
+            // describes paperwork rather than walking.
+            let returnsToTheSameStreet =
+                isBrief
+                && previous.street != nil
+                && segments.indices.contains(position + 1)
+                && segments[position + 1].street == previous.street
+
+            guard turn != nil || renamed, !isConnector, !returnsToTheSameStreet else {
                 announced[announced.count - 1].segment.end = segment.end
-                // A jog's headings are noise and the pre-jog heading stands. A
-                // stretch absorbed for having nothing to announce is real
-                // walking, though, and the heading it ends on is where the
-                // walker genuinely faces.
-                reference = isConnector ? incoming : nil
+                // A jog's headings are noise and the pre-jog heading stands, so
+                // the corner after it is judged against the street the walker
+                // thinks they are on. A stretch absorbed for having nothing to
+                // announce is real walking, though, and the heading it ends on
+                // is where the walker genuinely faces.
+                reference = isConnector || returnsToTheSameStreet ? incoming : nil
                 continue
             }
 

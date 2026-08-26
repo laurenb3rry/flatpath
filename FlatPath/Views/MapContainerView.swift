@@ -37,7 +37,19 @@ struct MapContainerView: View {
 
     @State private var query = ""
     @FocusState private var isSearchFocused: Bool
+
+    /// Where the walk begins, or `nil` to begin wherever the walker is.
+    ///
+    /// Nil is the ordinary case and is deliberately not filled in with the
+    /// current fix: a trip planned from where you are stays anchored to where
+    /// you are as you move, and only becomes a fixed place when someone says so.
+    @State private var origin: Destination?
+
     @State private var destination: Destination?
+
+    /// Which end of the trip the next search result or long press sets.
+    @State private var editing: Endpoint = .destination
+
     @State private var rejectedPin: String?
 
     @State private var routes: [PlannedRoute] = []
@@ -57,9 +69,13 @@ struct MapContainerView: View {
     /// exactly how much ground the app covers before it asks for their location.
     @State private var camera: MapCameraPosition = .region(ServiceArea.region)
 
-    /// Where a route from here would begin: the current fix, once there is one
-    /// worth trusting and it falls inside the routable area.
+    /// Where a route would begin: the place the walker chose, or failing that
+    /// the current fix, in either case only once it falls inside the routable
+    /// area.
     private var start: CLLocationCoordinate2D? {
+        if let origin {
+            return ServiceArea.contains(origin.coordinate) ? origin.coordinate : nil
+        }
         guard let coordinate = location.coordinate, ServiceArea.contains(coordinate) else {
             return nil
         }
@@ -96,11 +112,18 @@ struct MapContainerView: View {
                     }
                 }
 
-                if let start {
-                    Annotation("Start", coordinate: start) {
-                        StartMarker()
+                // The walker's own position, wherever the trip is starting
+                // from. It is the one thing on the map that is not a choice.
+                if let here = location.coordinate, ServiceArea.contains(here) {
+                    Annotation("You", coordinate: here) {
+                        WalkerMarker()
                     }
                     .annotationTitles(.hidden)
+                }
+
+                if let origin {
+                    Marker(origin.name, systemImage: "smallcircle.filled.circle", coordinate: origin.coordinate)
+                        .tint(Theme.destination)
                 }
 
                 if let destination {
@@ -139,7 +162,7 @@ struct MapContainerView: View {
             // Frame the arrival of a fix, not every update after it. Re-framing
             // on each new position would wrestle the map back from a walker who
             // had panned away from themselves to look at where they are going.
-            guard hasFix, destination == nil, let start else { return }
+            guard hasFix, origin == nil, destination == nil, let start else { return }
             frame(coordinates: [start])
         }
     }
@@ -180,16 +203,23 @@ struct MapContainerView: View {
         )
     }
 
-    private func select(_ destination: Destination) {
-        self.destination = destination
-        dismissSearch()
-        frame(coordinates: [start, destination.coordinate].compactMap { $0 })
-    }
+    /// Take a chosen place as whichever end of the trip is being set.
+    ///
+    /// Setting one end always returns the app to setting the other, because a
+    /// walker who has just named a start is on their way to naming a
+    /// destination, and because a lingering mode is a mode someone has to
+    /// remember they are in.
+    private func select(_ place: Destination) {
+        switch editing {
+        case .start:
+            origin = place
+        case .destination:
+            destination = place
+        }
 
-    private func clearDestination() {
-        destination = nil
-        rejectedPin = nil
-        frame(coordinates: [start].compactMap { $0 })
+        editing = .destination
+        dismissSearch()
+        frame(coordinates: [start, destination?.coordinate].compactMap { $0 })
     }
 
     private func dismissSearch() {
@@ -221,7 +251,7 @@ private extension MapContainerView {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Theme.secondaryText)
 
-                TextField("Search San Francisco", text: $query)
+                TextField(editing.prompt, text: $query)
                     .textFieldStyle(.plain)
                     .font(Theme.label(.body))
                     .foregroundStyle(Theme.primaryText)
@@ -313,33 +343,50 @@ private extension MapContainerView {
 private extension MapContainerView {
     /// The two ends of the trip as they currently stand, and what is missing.
     ///
+    /// Both ends are editable and both are addressed the same way. The start
+    /// defaults to wherever the walker is, because that is what it is nearly
+    /// every time -- but a walk being planned from the sofa for tomorrow starts
+    /// somewhere else, and there is no reason the app should only be able to
+    /// answer the question from where it is standing.
+    ///
     /// Until there are routes to show, this strip is the only evidence that a
     /// press or a search actually landed, so it says what was captured rather
     /// than only prompting for what was not.
     @ViewBuilder
     var tripSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            endpoint(
-                symbol: "location.fill",
-                title: "Start",
-                detail: startDetail,
-                isSet: start != nil,
-                // The walker's own position, which is the now-marker on the map:
-                // the one endpoint the accent is for.
-                accent: Theme.accent
-            )
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    endpoint(
+                        .start,
+                        symbol: origin == nil ? "location.fill" : "smallcircle.filled.circle",
+                        title: "Start",
+                        detail: startDetail,
+                        isSet: start != nil,
+                        // The walker's own position is the now-marker on the
+                        // map, and the accent belongs to it. A start they typed
+                        // is a place like any other, so it is drawn like one.
+                        accent: origin == nil ? Theme.accent : Theme.destination,
+                        trailing: origin == nil ? nil : "Use my location"
+                    )
 
-            hairline
+                    hairline
 
-            endpoint(
-                symbol: "flag.fill",
-                title: "Destination",
-                detail: destination.map { $0.address ?? $0.name } ?? "Press and hold the map, or search above",
-                isSet: destination != nil,
-                accent: Theme.destination,
-                trailing: destination == nil ? nil : "Clear",
-                isBusy: isRouting
-            )
+                    endpoint(
+                        .destination,
+                        symbol: "flag.fill",
+                        title: "Destination",
+                        detail: destination.map { $0.address ?? $0.name }
+                            ?? "Press and hold the map, or search above",
+                        isSet: destination != nil,
+                        accent: Theme.destination,
+                        trailing: destination == nil ? nil : "Clear",
+                        isBusy: isRouting
+                    )
+                }
+
+                swapButton
+            }
 
             if let notice = rejectedPin ?? routingProblem {
                 Text(notice)
@@ -352,20 +399,85 @@ private extension MapContainerView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Turns the trip around.
+    ///
+    /// Worth a button of its own because the walk home is the same trip as the
+    /// walk there and is not the same route: FlatPath prices climbs, so the
+    /// return leg of an uphill trip is a different set of options entirely.
+    /// Retyping both ends to see them would be the app asking the walker to do
+    /// its work.
+    @ViewBuilder
+    var swapButton: some View {
+        Button {
+            withAnimation(Theme.Motion.selection) { swapEndpoints() }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(Theme.label(.subheadline, weight: .semibold))
+                .frame(width: 34, height: 34)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(canSwap ? Theme.secondaryText : Theme.tertiaryText)
+        .disabled(!canSwap)
+        .accessibilityLabel("Swap start and destination")
+    }
+
+    /// Swapping needs somewhere for each end to land. With no destination set
+    /// and no fix to fall back on there is nothing to exchange.
+    var canSwap: Bool {
+        destination != nil || origin != nil
+    }
+
+    func swapEndpoints() {
+        // The start has to be made explicit before it can become a destination:
+        // "wherever I am" is a rule for one end of a trip, not a place.
+        let newDestination = origin ?? myLocation
+        let newOrigin = destination
+
+        origin = newOrigin
+        destination = newDestination
+        editing = .destination
+        rejectedPin = nil
+        dismissSearch()
+        frame(coordinates: [start, destination?.coordinate].compactMap { $0 })
+    }
+
+    /// Where the walker is, as a place that can be named and swapped, or `nil`
+    /// when there is no fix worth using.
+    var myLocation: Destination? {
+        guard let coordinate = location.coordinate, ServiceArea.contains(coordinate) else {
+            return nil
+        }
+        return Destination(
+            name: "My location",
+            address: Self.coordinateLabel.string(from: coordinate),
+            coordinate: coordinate
+        )
+    }
+
     var startDetail: String {
-        if let start {
+        if let origin {
+            origin.address ?? origin.name
+        } else if let start {
             Self.coordinateLabel.string(from: start)
         } else if let failure = location.failure {
             failure
         } else if location.coordinate != nil {
-            "You are outside San Francisco, so there is nothing to route from"
+            "You are outside San Francisco — tap to set a start"
         } else {
             "Waiting for your location…"
         }
     }
 
+    /// One end of the trip: what it is now, and a way to change it.
+    ///
+    /// The whole row is the control. Tapping it says which end the next search
+    /// or long press is for, which is the only state the two ends need between
+    /// them -- there is no separate mode to leave, because choosing something
+    /// ends it.
     @ViewBuilder
     func endpoint(
+        _ end: Endpoint,
         symbol: String,
         title: String,
         detail: String,
@@ -374,38 +486,67 @@ private extension MapContainerView {
         trailing: String? = nil,
         isBusy: Bool = false
     ) -> some View {
+        let isEditing = editing == end && isSearchFocused
+
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol)
                 .font(Theme.label(.caption))
                 .foregroundStyle(isSet ? accent : Theme.tertiaryText)
                 .frame(width: 16)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(Theme.label(.caption, weight: .semibold))
-                    .foregroundStyle(Theme.secondaryText)
-                // A set endpoint is a coordinate, which is a figure; an unset
-                // one is a sentence asking for one.
-                Text(detail)
-                    .font(isSet ? Theme.figure(.footnote) : Theme.label(.footnote))
-                    .foregroundStyle(isSet ? Theme.primaryText : Theme.secondaryText)
+            Button {
+                edit(end)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(Theme.label(.caption, weight: .semibold))
+                        .foregroundStyle(isEditing ? Theme.accent : Theme.secondaryText)
+                    // A set endpoint is a place or a coordinate, which reads as
+                    // a figure; an unset one is a sentence asking for one.
+                    Text(detail)
+                        .font(isSet ? Theme.figure(.footnote) : Theme.label(.footnote))
+                        .foregroundStyle(isSet ? Theme.primaryText : Theme.secondaryText)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(.rect)
             }
-
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
 
             if isBusy {
                 ProgressView().controlSize(.small)
             }
 
             if let trailing {
-                // Not the accent: clearing a destination undoes a choice rather
-                // than making one, and emerald is spoken for.
-                Button(trailing) { clearDestination() }
+                // Not the accent: clearing an end undoes a choice rather than
+                // making one, and emerald is spoken for.
+                Button(trailing) { clear(end) }
                     .font(Theme.label(.footnote))
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.secondaryText)
+                    .fixedSize()
             }
         }
+    }
+
+    /// Point the search and the next long press at one end of the trip.
+    func edit(_ end: Endpoint) {
+        editing = end
+        query = ""
+        search.clear()
+        isSearchFocused = true
+    }
+
+    func clear(_ end: Endpoint) {
+        switch end {
+        case .start:
+            origin = nil
+        case .destination:
+            destination = nil
+        }
+        rejectedPin = nil
+        frame(coordinates: [start, destination?.coordinate].compactMap { $0 })
     }
 }
 
@@ -469,12 +610,13 @@ private extension MapContainerView {
     /// plan, though, since a destination can be set before there is anywhere to
     /// route from.
     struct PlanRequest: Equatable {
+        let origin: Destination.ID?
         let destination: Destination.ID?
         let hasStart: Bool
     }
 
     var planRequest: PlanRequest {
-        PlanRequest(destination: destination?.id, hasStart: start != nil)
+        PlanRequest(origin: origin?.id, destination: destination?.id, hasStart: start != nil)
     }
 
     /// Find the routes for the current pair of endpoints, if there is one.
@@ -532,6 +674,20 @@ private extension MapContainerView {
         selectedRoute = nil
     }
 
+}
+
+/// One end of a trip, for saying which end is being set.
+private enum Endpoint {
+    case start
+    case destination
+
+    /// What the search field asks for while this end is the one being filled.
+    var prompt: String {
+        switch self {
+        case .start: "Search for a starting point"
+        case .destination: "Search San Francisco"
+        }
+    }
 }
 
 /// A route option with its geometry already resolved.
@@ -649,9 +805,9 @@ private enum RoutePlan {
 // MARK: - Markers
 
 /// The walker's own position, drawn rather than left to `UserAnnotation` so that
-/// it reads as one end of a trip alongside the destination flag, not as an
+/// it reads as part of the trip alongside the destination flag, not as an
 /// unrelated system dot that happens to share the map.
-private struct StartMarker: View {
+private struct WalkerMarker: View {
     var body: some View {
         Circle()
             .fill(Theme.accent)

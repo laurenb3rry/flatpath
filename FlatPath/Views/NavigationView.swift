@@ -46,6 +46,9 @@ struct NavigationView: View {
     @State private var camera: MapCameraPosition = .automatic
     @State private var live = LiveNavigation()
 
+    /// Whether the whole list of directions is pulled down over the map.
+    @State private var showsAllSteps = false
+
     init(
         route: RouteOption,
         graph: WalkingGraph,
@@ -177,6 +180,25 @@ struct NavigationView: View {
     private var hasArrived: Bool { follower.hasArrived }
 
     private var banner: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(Theme.Motion.selection) { showsAllSteps.toggle() }
+            } label: {
+                instruction
+            }
+            .buttonStyle(.plain)
+
+            if showsAllSteps {
+                hairline
+                allSteps
+            }
+        }
+        .background(Theme.surface)
+        .overlay(alignment: .bottom) { hairline }
+    }
+
+    /// The instruction in hand, and the handle for the rest of them.
+    private var instruction: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 14) {
                 // The instruction in hand is the active thing on this screen,
@@ -202,6 +224,14 @@ struct NavigationView: View {
                 }
 
                 Spacer(minLength: 0)
+
+                // The only affordance for the list below. Rotating rather than
+                // swapping glyphs so the tap reads as the same control moving.
+                Image(systemName: "chevron.down")
+                    .font(Theme.label(.footnote, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .rotationEffect(.degrees(showsAllSteps ? 180 : 0))
+                    .padding(.top, 6)
             }
 
             if !hasArrived {
@@ -227,8 +257,7 @@ struct NavigationView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .overlay(alignment: .bottom) { hairline }
+        .contentShape(.rect)
     }
 
     private var hairline: some View {
@@ -273,6 +302,44 @@ struct NavigationView: View {
             }
             .foregroundStyle(color)
         }
+    }
+
+    /// Every direction on the route, from the first to the destination.
+    ///
+    /// The whole list rather than only what is left. A walker opening this is
+    /// usually checking the shape of the trip -- how many turns, which streets,
+    /// how far in -- and that question needs the part already walked as much as
+    /// the part ahead. What has been done is dimmed rather than dropped, so the
+    /// list reads as a position in a route instead of a shrinking to-do list.
+    private var allSteps: some View {
+        ScrollViewReader { scroller in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(follower.steps) { step in
+                        StepRow(
+                            step: step,
+                            state: state(of: step),
+                            isLast: step.id == follower.steps.last?.id
+                        )
+                        .id(step.id)
+                    }
+                }
+            }
+            // Tall enough to hold a handful of turns, short enough that the map
+            // and the walker's position on it are never entirely covered.
+            .frame(maxHeight: 320)
+            .onAppear {
+                // Open at the instruction in hand rather than at the start of a
+                // walk that may be an hour behind them.
+                scroller.scrollTo(follower.index, anchor: .center)
+            }
+        }
+    }
+
+    private func state(of step: ManeuverStep) -> StepRow.State {
+        if step.id < follower.index { .walked }
+        else if step.id == follower.index { .current }
+        else { .ahead }
     }
 
     /// Meters to the corner ahead, in the same units as the cards. Shown only
@@ -369,6 +436,81 @@ private extension NavigationView {
         let grade = Grade(slope: steepest)
         guard grade.isWorthWarningAbout else { return nil }
         return NavigationAttributes.Climb(grade: grade, percentage: WalkingFigures.grade(steepest))
+    }
+}
+
+/// One direction in the list.
+private struct StepRow: View {
+    enum State {
+        case walked
+        case current
+        case ahead
+    }
+
+    let step: ManeuverStep
+    let state: State
+    let isLast: Bool
+
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: step.symbol)
+                .font(Theme.label(.subheadline, weight: .semibold))
+                .foregroundStyle(symbolColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(step.instruction)
+                    .font(Theme.label(.subheadline, weight: state == .current ? .semibold : .regular))
+                    .foregroundStyle(textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !isLast {
+                    HStack(spacing: 6) {
+                        Text(WalkingFigures.distance(meters: step.distance))
+                        if let color = Theme.warning(for: step.grade) {
+                            Text("·").foregroundStyle(Theme.tertiaryText)
+                            Text("\(WalkingFigures.grade(step.steepest)) climb")
+                                .foregroundStyle(color)
+                        }
+                    }
+                    .font(Theme.figure(.caption))
+                    .foregroundStyle(state == .walked ? Theme.tertiaryText : Theme.secondaryText)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(state == .current ? Theme.accentWash : .clear)
+        .overlay(alignment: .bottom) {
+            if !isLast {
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(height: 1 / displayScale)
+                    .padding(.leading, 50)
+            }
+        }
+    }
+
+    /// The accent marks the instruction in hand — the same thing it means on the
+    /// map, on the cards, and on the Lock Screen.
+    private var symbolColor: Color {
+        switch state {
+        case .walked: Theme.tertiaryText
+        case .current: Theme.accent
+        case .ahead: Theme.secondaryText
+        }
+    }
+
+    private var textColor: Color {
+        switch state {
+        case .walked: Theme.tertiaryText
+        case .current, .ahead: Theme.primaryText
+        }
     }
 }
 

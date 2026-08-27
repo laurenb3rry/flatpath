@@ -93,10 +93,10 @@ struct MapContainerView: View {
 
     /// How much ground one point of screen currently covers, in meters.
     ///
-    /// The hill waves are sized from this so that they stay the same size to
-    /// look at whether the map is showing four blocks or the whole city. It is
-    /// held coarsely — see `measureGround(using:)` — so that panning does not
-    /// redraw them at a slightly different size every frame.
+    /// The dots that mark a climb are spaced from this, so that they stay the
+    /// same size and the same distance apart whether the map is showing four
+    /// blocks or the whole city. Held coarsely -- see `measureGround(of:using:)`
+    /// -- so that panning does not re-place every dot on the map every frame.
     @State private var groundScale = 1.0
 
     /// The reroute a tapped hill set off, if one is still being worked out.
@@ -153,7 +153,13 @@ struct MapContainerView: View {
                 route: walk.option,
                 graph: graph,
                 location: location,
-                destination: destination?.name ?? "your destination"
+                destination: destination.flatMap { place in
+                    place.address?
+                        .split(separator: ",", maxSplits: 1)
+                        .first
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        ?? place.name
+                } ?? "your destination"
             ) {
                 navigating = nil
             }
@@ -209,37 +215,25 @@ struct MapContainerView: View {
                 }
 
                 if let selected = routes.first(where: { $0.id == selectedRoute }) {
-                    // Under the line rather than over it: a detour is route,
-                    // and the glow only has to say which stretch of it the
-                    // walker put there and can take back.
-                    ForEach(selected.detours) { detour in
-                        MapPolyline(coordinates: detour.coordinates)
-                            .stroke(Theme.detourGlow, style: Theme.Line.stroke(Theme.Line.detour))
-                    }
-
-                    ForEach(selected.shades) { shade in
-                        MapPolyline(coordinates: shade.coordinates)
-                            .stroke(shade.color, style: Theme.Line.stroke(Theme.Line.selected))
-                    }
-
                     // Only the chosen route is marked for steepness. Marking
                     // every line at once would say nothing about the choice
                     // between them, and the walker is comparing routes here --
                     // what they need to see is which parts of *this* one climb.
                     //
-                    // Drawn in the line's own color, as a wave rather than as a
-                    // warning: the hills are the part of the route the walker
-                    // can argue with, and one is refused by tapping the wave.
-                    ForEach(selected.climbs) { climb in
-                        MapPolyline(coordinates: Zigzag.along(
-                            climb.coordinates,
-                            amplitude: Double(Theme.Line.hillAmplitude) * groundScale,
-                            wavelength: Double(Theme.Line.hillWave) * groundScale
-                        ))
-                        .stroke(
-                            Theme.routeShade(at: climb.along),
-                            style: Theme.Line.stroke(Theme.Line.hill)
-                        )
+                    // The mark is the line itself going to dots, not a second
+                    // shape laid over it: the hills are the part of the route
+                    // the walker can argue with, and one is refused by tapping
+                    // the dotted stretch.
+                    ForEach(selected.segments) { segment in
+                        if segment.isClimb {
+                            ForEach(dots(along: segment), id: \.id) { dot in
+                                MapPolyline(coordinates: dot.stub)
+                                    .stroke(segment.color, style: Theme.Line.dot)
+                            }
+                        } else {
+                            MapPolyline(coordinates: segment.coordinates)
+                                .stroke(segment.color, style: Theme.Line.stroke(Theme.Line.selected))
+                        }
                     }
 
                     // Last, and on top of everything the route is drawn from:
@@ -262,14 +256,18 @@ struct MapContainerView: View {
                     .annotationTitles(.hidden)
                 }
 
-                if let origin {
-                    Marker(origin.name, systemImage: "smallcircle.filled.circle", coordinate: origin.coordinate)
-                        .tint(Theme.destination)
+                if let routeStart = routes.first(where: { $0.id == selectedRoute })?.coordinates.first {
+                    Annotation("", coordinate: routeStart) {
+                        StartMarker()
+                    }
+                    .annotationTitles(.hidden)
                 }
 
                 if let destination {
-                    Marker(destination.name, systemImage: "flag.fill", coordinate: destination.coordinate)
-                        .tint(Theme.destination)
+                    Annotation("", coordinate: destination.coordinate) {
+                        DestinationMarker()
+                    }
+                    .annotationTitles(.hidden)
                 }
             }
             .mapStyle(Theme.mapStyle)
@@ -288,6 +286,59 @@ struct MapContainerView: View {
             .gesture(dropPin(using: proxy))
         }
     }
+
+    /// One dot of a marked climb, identified by where it falls so that the run
+    /// of them is a stable list to draw from.
+    private struct RouteDot: Identifiable {
+        let id: Int
+        let stub: [CLLocationCoordinate2D]
+    }
+
+    /// The dots standing in for one climbing stretch of the route.
+    private func dots(along segment: PlannedRoute.Segment) -> [RouteDot] {
+        RouteDots
+            .along(segment.coordinates, every: Double(Theme.Line.dotSpacing) * groundScale)
+            .enumerated()
+            .map { RouteDot(id: segment.id << 16 | $0.offset, stub: $0.element) }
+    }
+
+    /// Note how much ground the map is currently showing, coarsely.
+    ///
+    /// Measured through the proxy rather than from the camera's own figures,
+    /// which are stated in a distance from the ground whose relationship to
+    /// points on the screen depends on the device: converting two coordinates a
+    /// known distance apart and measuring the gap between them asks the map
+    /// directly and cannot drift from what it draws.
+    ///
+    /// Rounded to half-octaves of zoom, and that is the point of it. This runs
+    /// on every frame of a pan, and a scale that changed continuously would
+    /// re-place every dot on the map as the walker's thumb moved -- a shimmer
+    /// along the route that says nothing and costs a redraw. Half an octave is
+    /// close enough that the dots never look wrong and coarse enough that
+    /// ordinary panning does not move between steps at all.
+    private func measureGround(of region: MKCoordinateRegion, using proxy: MapProxy) {
+        // Probed across a quarter of what is on screen, so both ends of the
+        // measurement are inside the map being measured. A probe of some fixed
+        // size on the ground would be far outside the view at street zoom and
+        // would be asking the map to extrapolate.
+        let degrees = region.span.latitudeDelta / 4
+        guard degrees > 0 else { return }
+
+        let here = region.center
+        let north = CLLocationCoordinate2D(latitude: here.latitude + degrees, longitude: here.longitude)
+        guard let from = proxy.convert(here, to: .local),
+              let to = proxy.convert(north, to: .local)
+        else { return }
+
+        let points = hypot(to.x - from.x, to.y - from.y)
+        guard points > 0 else { return }
+
+        let metersPerPoint = degrees * Self.metersPerDegreeLatitude / Double(points)
+        let step = (log2(metersPerPoint) * 2).rounded() / 2
+        groundScale = pow(2, step)
+    }
+
+    private static let metersPerDegreeLatitude = 111_320.0
 
     // MARK: Destination capture
 
@@ -373,44 +424,6 @@ struct MapContainerView: View {
     }
 
     // MARK: Refusing a hill
-
-    /// Note how much ground the map is currently showing, coarsely.
-    ///
-    /// Measured through the proxy rather than from the camera's own figures,
-    /// which are stated in a distance from the ground whose relationship to
-    /// points on the screen depends on the device: converting two coordinates a
-    /// known distance apart and measuring the gap between them asks the map
-    /// directly and cannot drift from what it draws.
-    ///
-    /// Rounded to half-octaves of zoom, and that is the point of it. This runs
-    /// on every frame of a pan, and a scale that changed continuously would
-    /// re-cut every hill wave on the map as the walker's thumb moved -- a
-    /// shimmer along the route that says nothing and costs a redraw. Half an
-    /// octave is close enough that the waves never look wrong and coarse enough
-    /// that ordinary panning does not move between steps at all.
-    private func measureGround(of region: MKCoordinateRegion, using proxy: MapProxy) {
-        // Probed across a quarter of what is on screen, so both ends of the
-        // measurement are inside the map being measured. A probe of some fixed
-        // size on the ground would be far outside the view at street zoom and
-        // would be asking the map to extrapolate.
-        let degrees = region.span.latitudeDelta / 4
-        guard degrees > 0 else { return }
-
-        let here = region.center
-        let north = CLLocationCoordinate2D(latitude: here.latitude + degrees, longitude: here.longitude)
-        guard let from = proxy.convert(here, to: .local),
-              let to = proxy.convert(north, to: .local)
-        else { return }
-
-        let points = hypot(to.x - from.x, to.y - from.y)
-        guard points > 0 else { return }
-
-        let metersPerPoint = degrees * Self.metersPerDegreeLatitude / Double(points)
-        let step = (log2(metersPerPoint) * 2).rounded() / 2
-        groundScale = pow(2, step)
-    }
-
-    private static let metersPerDegreeLatitude = 111_320.0
 
     /// Take a tap on the map: refuse the hill under it, or put back the ground
     /// a detour of the walker's own replaced.
@@ -805,18 +818,32 @@ private extension MapContainerView {
             // Sized to the matches, not to the room available. A scroll view
             // left to itself takes every point it is offered, which would leave
             // one result sitting at the top of a card the height of the screen.
-            .frame(maxHeight: maxHeight)
+            .frame(height: min(maxHeight, CGFloat(search.results.count) * Self.searchResultHeight))
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.never)
         } else {
-            Text(searchHint(for: end))
-                .font(Theme.label(.footnote))
-                .foregroundStyle(Theme.tertiaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+            VStack(alignment: .leading, spacing: 10) {
+                if end == .start {
+                    Button("Use my location") {
+                        clear(.start)
+                        dismissSearch()
+                    }
+                    .font(Theme.label(.footnote, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.secondaryText)
+                }
+
+                Text(searchHint(for: end))
+                    .font(Theme.label(.footnote))
+                    .foregroundStyle(Theme.tertiaryText)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
     }
+
+    private static let searchResultHeight: CGFloat = 61
 
     func resultRow(_ result: Destination) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -894,18 +921,26 @@ private extension MapContainerView {
                 swapButton
 
                 VStack(alignment: .leading, spacing: 8) {
-                    endpoint(
-                        .start,
-                        trailing: origin == nil ? nil : "Use my location"
-                    )
+                    endpoint(.start)
 
                     hairline
 
-                    endpoint(
-                        .destination,
-                        trailing: destination == nil ? nil : "Clear"
-                    )
+                    endpoint(.destination)
                 }
+
+                Group {
+                    if destination != nil {
+                        Button("Clear") {
+                            clear(.destination)
+                        }
+                        .font(Theme.label(.footnote))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.secondaryText)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: Self.endpointActionWidth, height: Self.endpointRowHeight)
             }
 
             if let notice = steeringProblem ?? rejectedPin ?? routingProblem {
@@ -918,6 +953,9 @@ private extension MapContainerView {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private static let endpointRowHeight: CGFloat = 52
+    private static let endpointActionWidth: CGFloat = 52
 
     // MARK: Endpoint state, shared by the panel and the search card
 
@@ -1097,6 +1135,7 @@ private extension MapContainerView {
                     .fixedSize()
             }
         }
+        .frame(height: Self.endpointRowHeight)
     }
 
     func clear(_ end: Endpoint) {
@@ -1445,12 +1484,13 @@ private struct PlannedRoute: Identifiable {
     /// The waypoints the route reaches, as points to draw and to tap.
     let stops: [Stop]
 
-    /// The route drawn as consecutive runs, each a shade deeper than the last.
+    /// The route as it is drawn: consecutive runs, each a shade deeper than
+    /// the last, and each either ordinary ground or a marked climb.
     ///
     /// Consecutive rather than overlaid: run `i` ends on the coordinate run
     /// `i + 1` begins on, so the joins are shared points and the line has no
     /// gaps in it at any zoom.
-    let shades: [Shade]
+    let segments: [Segment]
 
     /// The identity of the option this came from, which the detours do not
     /// change. A route the walker has bent around two hills is still the card
@@ -1458,34 +1498,115 @@ private struct PlannedRoute: Identifiable {
     /// the selection on it across a rebuild.
     var id: RouteOption.ID { base.id }
 
-    /// One solid run of the selected route.
-    struct Shade: Identifiable {
+    /// One run of the selected route as it is drawn.
+    struct Segment: Identifiable {
         /// Its position along the route, which is unique within it.
         let id: Int
         let color: Color
         let coordinates: [CLLocationCoordinate2D]
+
+        /// Whether this run climbs hard enough to be marked, and so is drawn
+        /// as dots rather than as a solid line.
+        let isClimb: Bool
     }
 
-    /// Cut the route into runs and shade each by how far along it sits.
-    private static func shades(along coordinates: [CLLocationCoordinate2D]) -> [Shade] {
-        let spans = coordinates.count - 1
-        guard spans > 1 else {
-            return coordinates.isEmpty
-                ? []
-                : [Shade(id: 0, color: Theme.routeShade(at: 0), coordinates: coordinates)]
+    /// Marked runs joined into the hills they are pieces of.
+    ///
+    /// Two things fragment a hill. It is not one steepness the whole way up --
+    /// a route up Nob Hill crosses moderate and steep blocks in turn, and the
+    /// runs a tap refuses follow those bands because the band is what the
+    /// walker is objecting to. And both sides of most streets here are mapped
+    /// as their own sidewalks joined by marked crossings, so a single climbing
+    /// block arrives as several runs with a few flat meters of crossing between
+    /// each pair.
+    ///
+    /// Drawn as they arrive, each piece would space its own dots from its own
+    /// length and lay a solid stretch of line across every crossing: the mark
+    /// for one continuous climb would be a row of clusters. To the eye it is
+    /// one hill, so it is merged into one before it is drawn -- while the
+    /// targets underneath stay exactly as they were, because a walker refusing
+    /// a hill is refusing a band of it and not the whole rise.
+    ///
+    /// Only short gaps are bridged. A genuinely flat block between two climbs
+    /// is flat and gets drawn as the solid line it is.
+    private static func merged(
+        _ runs: [ClosedRange<Int>],
+        along coordinates: [CLLocationCoordinate2D]
+    ) -> [ClosedRange<Int>] {
+        var travelled = [0.0]
+        travelled.reserveCapacity(coordinates.count)
+        for (from, to) in zip(coordinates, coordinates.dropFirst()) {
+            travelled.append(travelled[travelled.count - 1] + from.distance(to: to))
         }
 
-        let runs = min(Theme.routeShadeCount, spans)
-        return (0 ..< runs).map { run in
-            // Integer arithmetic so the runs tile the route exactly: each one
-            // ends on the index the next begins on, with no coordinate dropped
-            // between them and none drawn twice.
-            let from = run * spans / runs
-            let through = (run + 1) * spans / runs
-            return Shade(
-                id: run,
-                color: Theme.routeShade(at: (Double(run) + 0.5) / Double(runs)),
-                coordinates: Array(coordinates[from ... through])
+        return runs.sorted { $0.lowerBound < $1.lowerBound }.reduce(into: []) { spans, run in
+            guard let last = spans.last,
+                  travelled[run.lowerBound] - travelled[last.upperBound] <= bridgedGap
+            else {
+                spans.append(run)
+                return
+            }
+            spans[spans.count - 1] = last.lowerBound ... max(last.upperBound, run.upperBound)
+        }
+    }
+
+    /// The longest stretch of gentle ground treated as part of the climb on
+    /// either side of it, in meters.
+    ///
+    /// Sized to a street crossing, which is what nearly all of these gaps are.
+    /// Wider than that and the mark would start swallowing the flat block a
+    /// walker was counting on.
+    private static let bridgedGap = 30.0
+
+    /// Cut the route into the runs it is drawn in.
+    ///
+    /// One partition rather than two overlaid. The shading and the climb marks
+    /// used to be separate passes — a solid line the whole way, with the steep
+    /// stretches drawn again on top — and that worked only because the second
+    /// pass covered the first. It cannot work now that a climb is the line
+    /// going to dots: a run that was half climb and half not would show the
+    /// solid line through the gaps. So the route is cut at every boundary from
+    /// either, and each run that comes out is entirely one thing or the other.
+    private static func segments(
+        along coordinates: [CLLocationCoordinate2D],
+        climbing climbs: [ClosedRange<Int>]
+    ) -> [Segment] {
+        let spans = coordinates.count - 1
+        guard spans > 0 else { return [] }
+
+        // Integer arithmetic so the shade runs tile the route exactly: each one
+        // ends on the index the next begins on, with no coordinate dropped
+        // between them and none drawn twice.
+        let shades = min(Theme.routeShadeCount, spans)
+        var cuts: Set<Int> = [0, spans]
+        for shade in 1 ..< max(1, shades) {
+            cuts.insert(shade * spans / shades)
+        }
+
+        // A climb is one run whatever the shading would have done to it. The
+        // dots along it are spaced from its own length, so cutting a hill in
+        // half to deepen its color would restart that spacing partway up and
+        // crowd the dots on either side of the join -- and a stretch shorter
+        // than the space between two dots cannot be drawn as dots at all.
+        cuts = cuts.filter { cut in
+            !climbs.contains { $0.lowerBound < cut && cut < $0.upperBound }
+        }
+        for climb in climbs {
+            cuts.insert(climb.lowerBound)
+            cuts.insert(climb.upperBound)
+        }
+
+        let boundaries = cuts.sorted()
+        return zip(boundaries, boundaries.dropFirst()).enumerated().map { position, run in
+            let (from, through) = run
+            return Segment(
+                id: position,
+                color: Theme.accent,
+                coordinates: Array(coordinates[from ... through]),
+                // Every boundary of every climb is a cut, so a run either lies
+                // inside one for its whole length or lies outside every one;
+                // testing where it starts settles it.
+                isClimb: climbs.contains { $0.lowerBound <= from && from < $0.upperBound }
             )
         }
     }
@@ -1501,10 +1622,6 @@ private struct PlannedRoute: Identifiable {
         /// Where the run starts along the route, which is unique within it.
         let id: Int
         let grade: Grade
-
-        /// How far along the route the run's middle sits, from 0 to 1, so the
-        /// wave can be drawn in the shade the line itself has there.
-        let along: Double
 
         /// The graph nodes the run covers, which is what a refusal is stated
         /// in: the map draws coordinates, but the router needs somewhere to
@@ -1598,25 +1715,27 @@ private struct PlannedRoute: Identifiable {
             )
         }
 
-        shades = Self.shades(along: coordinates)
-
-        let spans = max(1, detoured.edges.count)
-        climbs = Self.runs(across: detoured.edges.count) { position in
+        let climbRuns = Self.runs(across: detoured.edges.count) { position in
             let grade = Grade(
                 rise: Double(graph.edgeDeltaElevation[detoured.edges[position]]),
                 over: Double(graph.edgeLength[detoured.edges[position]])
             )
             return grade.isWorthWarningAbout ? grade : nil
         }
-        .map { run in
+
+        climbs = climbRuns.map { run in
             Climb(
                 id: run.nodes.lowerBound,
                 grade: run.mark,
-                along: Double(run.nodes.lowerBound + run.nodes.upperBound) / 2 / Double(spans),
                 nodes: Array(detoured.nodes[run.nodes]),
                 coordinates: Array(coordinates[run.nodes])
             )
         }
+
+        segments = Self.segments(
+            along: coordinates,
+            climbing: Self.merged(climbRuns.map(\.nodes), along: coordinates)
+        )
 
         detours = Self.runs(across: detoured.edges.count) { detoured.detouredBy[$0] }
             .map { run in
@@ -1731,14 +1850,27 @@ private struct StopMarker: View {
 private struct WalkerMarker: View {
     var body: some View {
         Circle()
-            .fill(Theme.accent)
-            .overlay(Circle().stroke(Theme.background, lineWidth: 3))
-            .frame(width: 18, height: 18)
+            .fill(Color.white)
+            .frame(width: 12, height: 12)
             .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 
 // MARK: - Geometry helpers
+
+private extension CLLocationCoordinate2D {
+    /// Meters between two coordinates, near enough.
+    ///
+    /// The equirectangular approximation the rest of the app measures short
+    /// distances with. Over the tens of meters this is asked about it agrees
+    /// with a proper distance to well inside the accuracy of the nodes.
+    func distance(to other: CLLocationCoordinate2D) -> Double {
+        let metersPerDegree = 111_320.0
+        let northing = (other.latitude - latitude) * metersPerDegree
+        let easting = (other.longitude - longitude) * metersPerDegree * cos(latitude * .pi / 180)
+        return hypot(northing, easting)
+    }
+}
 
 private extension CGPoint {
     /// How far this point lies from a line segment, which is what a tap on a

@@ -152,7 +152,7 @@ struct NavigationView: View {
 
             // The corner the instruction is talking about, marked so that the
             // sentence and the map are pointing at the same place. Not on the
-            // last step, where the flag below is already marking it.
+            // last step, where the destination mark below is already on it.
             if let pending = follower.pending, !follower.isFinishing {
                 Annotation("Next turn", coordinate: pending.coordinate) {
                     ManeuverMarker(symbol: pending.symbol)
@@ -161,8 +161,9 @@ struct NavigationView: View {
             }
 
             if let destination = coordinates.last {
-                Marker("Destination", systemImage: "flag.fill", coordinate: destination)
-                    .tint(Theme.destination)
+                Annotation(self.destination, coordinate: destination) {
+                    DestinationMarker()
+                }
             }
 
             if let fix {
@@ -352,6 +353,10 @@ struct NavigationView: View {
     }
 
     /// Why the instruction is not advancing, when that needs saying.
+    /// The smallest comfortable target for a finger, and the size the way out
+    /// is given whatever the word in it measures.
+    private static let endTapTarget: CGFloat = 44
+
     private var notice: String? {
         if let failure = location.failure { return failure }
         guard fix == nil else { return nil }
@@ -367,7 +372,11 @@ struct NavigationView: View {
     /// climb, so the climb still to come is the number that tells them whether
     /// the trade is working out.
     private var footer: some View {
-        HStack(alignment: .lastTextBaseline, spacing: 12) {
+        // Centered rather than baseline-aligned. Aligning baselines matched the
+        // way out to the *last* line of the figures beside it -- the small one
+        // -- which left it sitting against the bottom of the panel instead of
+        // on it.
+        HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 // A duration is never rounded down to nothing, so standing at
                 // the destination would otherwise be reported as a minute away.
@@ -393,11 +402,20 @@ struct NavigationView: View {
             Spacer(minLength: 0)
 
             // Leaving is not the active state, so it is drawn as a way out
-            // rather than as something to press.
-            Button("End", role: .cancel, action: onEnd)
-                .font(Theme.label(.subheadline, weight: .medium))
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.secondaryText)
+            // rather than as something to press. Drawn as one, though, and not
+            // sized as one: the label is three characters, and a hit area that
+            // stopped at the glyphs would be a target the walker has to be
+            // accurate about while walking. The frame is what is tappable, not
+            // the word.
+            Button(action: onEnd) {
+                Text("End")
+                    .font(Theme.label(.subheadline, weight: .medium))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(minWidth: Self.endTapTarget, minHeight: Self.endTapTarget)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("End the walk")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -539,9 +557,8 @@ private struct ManeuverMarker: View {
 private struct WalkerMarker: View {
     var body: some View {
         Circle()
-            .fill(Theme.accent)
-            .overlay(Circle().stroke(Theme.background, lineWidth: 3))
-            .frame(width: 18, height: 18)
+            .fill(Color.white)
+            .frame(width: 12, height: 12)
             .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }

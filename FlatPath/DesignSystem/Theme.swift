@@ -225,33 +225,37 @@ enum Theme {
 
     enum Line {
         /// The chosen route, drawn heaviest.
-        static let selected: CGFloat = 7
+        static let selected: CGFloat = 5.5
 
         /// The rest, drawn thinner so the pile reads as one answer and some
         /// context rather than three equal lines.
         static let alternative: CGFloat = 4
 
-        /// The wave drawn over a steep stretch. Narrower than the line beneath
-        /// so the straight route still reads through it: the mark says the
-        /// walking here is work, not that the route goes somewhere else.
-        static let hill: CGFloat = 3.5
-
-        /// How far to either side of the route the hill wave reaches, in
-        /// points.
+        /// One dot of a marked climb.
         ///
-        /// Set wide enough to clear the route line it is drawn over. At half
-        /// that the wave stays inside the line's own width and reads as a
-        /// serrated edge -- something slightly wrong with the drawing rather
-        /// than a mark someone put there on purpose. It has to break the
-        /// line's silhouette to say that this stretch is different.
-        static let hillAmplitude: CGFloat = 7
-
-        /// Ground covered by one full turn of the hill wave, in points.
+        /// The dots replace the solid line rather than being laid over it. A
+        /// mark drawn on top of the route says the walking here is different; a
+        /// break in the route says the same thing with the line the walker is
+        /// already following, and costs no second shape and no second color.
         ///
-        /// Tight enough that a single steep block carries several full cycles,
-        /// which is what makes the mark read as roughness rather than as a
-        /// couple of kinks in the route.
-        static let hillWave: CGFloat = 10
+        /// A round cap on a stub of a line is what makes each one a circle. The
+        /// stub, and the spacing between them, are placed by `RouteDots` rather
+        /// than by a dash pattern -- see that file for why a dash cannot do it.
+        static var dot: StrokeStyle {
+            StrokeStyle(lineWidth: dotWidth, lineCap: .round)
+        }
+
+        /// A little narrower than the line it interrupts, so the dots read as
+        /// beads on the route rather than as the route with pieces missing.
+        static let dotWidth: CGFloat = 5.5
+
+        /// From one dot to the next, in points.
+        ///
+        /// Tight enough that a climb reads as a continuous stretch of route
+        /// rather than as a few marks that happen to lie in a row, open enough
+        /// that the dots stay separate circles at the zoom a whole route is
+        /// framed at.
+        static let dotSpacing: CGFloat = 11
 
         /// The casing under a stretch the walker's own tap put on the route.
         /// Wider than the line it sits beneath, so it reads as a glow around

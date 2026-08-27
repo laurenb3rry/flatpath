@@ -51,6 +51,18 @@ struct RouteOption: Identifiable {
     let edges: [Int]
 
     let metrics: RouteMetrics
+
+    /// What this walker thought a hill was worth — the settings the search that
+    /// found this route ran on.
+    ///
+    /// Deliberately not shown to anyone. The cards are named for what they
+    /// measure against each other rather than for the dial that produced them,
+    /// and nothing here changes that. It is carried because a route can be
+    /// re-planned after it is offered — sent through a point the walker pressed
+    /// on the map — and the leg that comes back has to be the same kind of walk
+    /// as the one they chose. Re-planning the flattest option at a neutral
+    /// setting would hand back the direct route under the flat route's name.
+    let cost: WalkingCost
 }
 
 /// How far out of the way a flat route may go, as a multiple of the quickest
@@ -254,7 +266,8 @@ enum RouteOptions {
         return Candidate(
             nodes: route.nodes,
             edges: edges,
-            metrics: RouteMetrics(edges: edges, in: graph)
+            metrics: RouteMetrics(edges: edges, in: graph),
+            cost: cost
         )
     }
 
@@ -265,6 +278,11 @@ enum RouteOptions {
         let nodes: [Int]
         let edges: [Int]
         let metrics: RouteMetrics
+
+        /// The settings this run used. Carried through the filtering so that
+        /// whichever candidates become cards can still say what kind of walker
+        /// they were found for.
+        let cost: WalkingCost
     }
 
     // MARK: - Filtering
@@ -422,7 +440,8 @@ enum RouteOptions {
                 name: names[position],
                 nodes: candidate.nodes,
                 edges: candidate.edges,
-                metrics: candidate.metrics
+                metrics: candidate.metrics,
+                cost: candidate.cost
             )
         }
     }

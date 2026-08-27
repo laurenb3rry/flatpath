@@ -80,8 +80,9 @@ struct MapContainerView: View {
     /// Why there are no routes, when the reason is worth showing.
     @State private var routingProblem: String?
 
-    /// Why the hill the walker tapped is still on their route.
-    @State private var hillProblem: String?
+    /// Why the change the walker just asked for is not on their route: a hill
+    /// with no way round it, or a point with no way through it.
+    @State private var steeringProblem: String?
 
     /// The identity the next refused hill gets.
     ///
@@ -180,9 +181,10 @@ struct MapContainerView: View {
             }
         }
         .onChange(of: selectedRoute) { _, _ in
-            // The notice was about a hill on the route that was showing when it
-            // was tapped, and there is no hill under it on this one.
-            hillProblem = nil
+            // The notice was about the route that was showing when the walker
+            // asked, and this is a different one — with its own hills, and its
+            // own ground under the point they pressed.
+            steeringProblem = nil
         }
         .onChange(of: location.hasFix) { _, hasFix in
             // Frame the arrival of a fix, not every update after it. Re-framing
@@ -238,6 +240,16 @@ struct MapContainerView: View {
                             Theme.routeShade(at: climb.along),
                             style: Theme.Line.stroke(Theme.Line.hill)
                         )
+                    }
+
+                    // Last, and on top of everything the route is drawn from:
+                    // a stop is the walker's own hand on the line and has to be
+                    // findable to be taken back off it.
+                    ForEach(selected.stops) { stop in
+                        Annotation("", coordinate: stop.coordinate) {
+                            StopMarker()
+                        }
+                        .annotationTitles(.hidden)
                     }
                 }
 
@@ -297,6 +309,17 @@ struct MapContainerView: View {
             }
     }
 
+    /// Take a press on the map.
+    ///
+    /// What it means depends on whether there is a walk on screen yet. With no
+    /// routes showing there is no trip, and the press states one end of it. With
+    /// routes showing there is, and a press is the walker saying which way round
+    /// they want to go — the trip keeps both its ends and the chosen line is
+    /// bent through the point.
+    ///
+    /// A press used to replace the destination in both cases, which made the
+    /// map's one gesture useless for the thing a walker most often wants from a
+    /// route in front of them: not somewhere else to go, a different way there.
     private func dropPin(at coordinate: CLLocationCoordinate2D) {
         guard ServiceArea.contains(coordinate) else {
             rejectedPin = "FlatPath only routes inside San Francisco."
@@ -304,6 +327,12 @@ struct MapContainerView: View {
         }
 
         rejectedPin = nil
+
+        if let selected = routes.first(where: { $0.id == selectedRoute }) {
+            steer(selected, through: coordinate)
+            return
+        }
+
         select(
             Destination(
                 name: "Dropped pin",
@@ -312,6 +341,34 @@ struct MapContainerView: View {
                 isNamed: false
             ),
             as: editing
+        )
+    }
+
+    /// Bend one route through a point on the map.
+    ///
+    /// The point is snapped to the network before anything is planned, the same
+    /// way both ends of a trip are. A press in the middle of the bay looks
+    /// perfectly ordinary on Apple's basemap and has no street under it to route
+    /// through, and the refusal has to happen here while there is still a
+    /// gesture to attach it to.
+    private func steer(_ route: PlannedRoute, through coordinate: CLLocationCoordinate2D) {
+        guard let stop = graph.nearestNode(
+            toLatitude: coordinate.latitude,
+            longitude: coordinate.longitude
+        ) else {
+            steeringProblem = "There is no walkable street near there."
+            return
+        }
+
+        // Pressing a point the route already runs through would add a stop that
+        // changes nothing and then sits on the line asking to be tapped off
+        // again.
+        guard !route.waypoints.contains(stop) else { return }
+
+        rebuild(
+            route,
+            through: RouteVia.insert(stop, into: route.waypoints, along: route.option.nodes, in: graph),
+            refusing: route.avoidances
         )
     }
 
@@ -369,6 +426,19 @@ struct MapContainerView: View {
         // not added to yet -- which would silently undo it.
         guard !isRerouting, let selected = routes.first(where: { $0.id == selectedRoute }) else { return }
 
+        // A stop is a point rather than a stretch, so it is the most
+        // deliberate thing on the line to aim at and is answered first. It also
+        // sits on top of the route, which means a hill wave is nearly always
+        // within reach of it too.
+        if let stop = nearest(to: point, among: selected.stops, using: proxy) {
+            rebuild(
+                selected,
+                through: selected.waypoints.filter { $0 != stop.mark.id },
+                refusing: selected.avoidances
+            )
+            return
+        }
+
         let detour = nearest(to: point, among: selected.detours, using: proxy)
         let climb = nearest(to: point, among: selected.climbs, using: proxy)
 
@@ -378,11 +448,15 @@ struct MapContainerView: View {
         // pointing at both meant the one that returns the route toward what
         // they were first shown.
         if let detour, detour.reach <= (climb?.reach ?? .infinity) {
-            reroute(selected, refusing: selected.avoidances.filter { $0.id != detour.mark.avoidance })
+            rebuild(
+                selected,
+                through: selected.waypoints,
+                refusing: selected.avoidances.filter { $0.id != detour.mark.avoidance }
+            )
         } else if let climb {
             let hill = AvoidedHill(id: nextAvoidance, nodes: climb.mark.nodes, grade: climb.mark.grade)
             nextAvoidance += 1
-            reroute(selected, refusing: selected.avoidances + [hill])
+            rebuild(selected, through: selected.waypoints, refusing: selected.avoidances + [hill])
         }
     }
 
@@ -413,11 +487,13 @@ struct MapContainerView: View {
         using proxy: MapProxy
     ) -> CGFloat? {
         let drawn = stretch.compactMap { proxy.convert($0, to: .local) }
-        guard drawn.count > 1 else { return nil }
+        guard let first = drawn.first else { return nil }
 
-        let nearest = zip(drawn, drawn.dropFirst())
-            .map { point.distance(toSegmentFrom: $0, to: $1) }
-            .min() ?? .infinity
+        // A stop is one point rather than a stretch, and measuring it as a
+        // segment of no length would divide by nothing.
+        let nearest = drawn.count > 1
+            ? zip(drawn, drawn.dropFirst()).map { point.distance(toSegmentFrom: $0, to: $1) }.min() ?? .infinity
+            : hypot(point.x - first.x, point.y - first.y)
         return nearest <= Self.tapReach ? nearest : nil
     }
 
@@ -428,12 +504,19 @@ struct MapContainerView: View {
     /// has to hunt for; drawn wider, walking the map would start rerouting it.
     private static let tapReach: CGFloat = 24
 
-    /// Rebuild one route against a different set of refused hills.
+    /// Rebuild one route against a different set of the walker's own changes.
     ///
-    /// The whole list is handed over rather than the change to it, because the
-    /// route is rebuilt from the original every time: that is what lets any one
-    /// detour be undone while the others stand.
-    private func reroute(_ route: PlannedRoute, refusing hills: [AvoidedHill]) {
+    /// Both whole lists are handed over rather than the change to them, because
+    /// the route is rebuilt from the planned one every time. That is what lets
+    /// any single stop or detour be taken back while the rest stand, and it is
+    /// why the two kinds of change compose instead of fighting: a press and a
+    /// tap both end up here, and the order they are applied in is fixed by the
+    /// rebuild rather than by which the walker did first.
+    private func rebuild(
+        _ route: PlannedRoute,
+        through waypoints: [Int],
+        refusing hills: [AvoidedHill]
+    ) {
         rerouting?.cancel()
 
         // Off the main actor for the same reason the first plan is: this is a
@@ -441,28 +524,33 @@ struct MapContainerView: View {
         // still has a finger on.
         let graph = graph
         let base = route.base
-        let asked = Set(hills.map(\.id)).subtracting(route.avoidances.map(\.id))
+        let newStops = Set(waypoints).subtracting(route.waypoints)
+        let newRefusals = Set(hills.map(\.id)).subtracting(route.avoidances.map(\.id))
 
         isRerouting = true
         rerouting = Task { @MainActor in
             defer { isRerouting = false }
 
             let rebuilt = await Task.detached(priority: .userInitiated) {
-                PlannedRoute(base: base, avoidances: hills, in: graph)
+                PlannedRoute(base: base, waypoints: waypoints, avoidances: hills, in: graph)
             }.value
 
             guard !Task.isCancelled, routes.contains(where: { $0.id == rebuilt.id }) else { return }
 
-            // Some hills have no way round. Between the bay and the next hill
-            // there is often nothing to offer, and the honest answer is to
-            // leave the route as it was drawn and say so, rather than to accept
-            // the tap and change nothing visible.
-            guard asked.isSubset(of: rebuilt.applied) else {
-                hillProblem = "There is no easier way around that hill nearby."
+            // Some points cannot be walked through and some hills have no way
+            // round. In both cases the honest answer is to leave the route as
+            // it was drawn and say so, rather than to accept the gesture and
+            // change nothing visible.
+            guard newStops.isSubset(of: Set(rebuilt.reached)) else {
+                steeringProblem = "No walking route passes through there."
+                return
+            }
+            guard newRefusals.isSubset(of: rebuilt.applied) else {
+                steeringProblem = "There is no easier way around that hill nearby."
                 return
             }
 
-            hillProblem = nil
+            steeringProblem = nil
             withAnimation(Theme.Motion.selection) {
                 routes = routes.map { $0.id == rebuilt.id ? rebuilt : $0 }
             }
@@ -820,7 +908,7 @@ private extension MapContainerView {
                 }
             }
 
-            if let notice = hillProblem ?? rejectedPin ?? routingProblem {
+            if let notice = steeringProblem ?? rejectedPin ?? routingProblem {
                 Text(notice)
                     .font(Theme.label(.footnote))
                     .foregroundStyle(Theme.secondaryText)
@@ -1204,7 +1292,7 @@ private extension MapContainerView {
         // Whatever a walker refused on the last set of routes was a statement
         // about those routes. A new pair of endpoints is a new walk, and it
         // arrives with nothing refused on it.
-        hillProblem = nil
+        steeringProblem = nil
         rerouting?.cancel()
         isRerouting = false
 
@@ -1260,7 +1348,7 @@ private extension MapContainerView {
     func discardRoutes() {
         routes = []
         selectedRoute = nil
-        hillProblem = nil
+        steeringProblem = nil
     }
 
 }
@@ -1322,16 +1410,25 @@ private struct PlannedRoute: Identifiable {
     /// The route as planned, before anything was refused on it.
     let base: RouteOption
 
+    /// Points on the map the walker has pressed to steer this route through,
+    /// in the order the route reaches them.
+    let waypoints: [Int]
+
     /// The hills the walker has sent this route around, in the order they
     /// asked.
     let avoidances: [AvoidedHill]
 
-    /// The route as drawn and as walked: `base`, detoured.
+    /// The route as drawn and as walked: `base`, steered and detoured.
     ///
     /// Everything downstream reads this and nothing else, so the cards report
-    /// what the detoured walk costs and turn-by-turn gives directions along the
+    /// what the changed walk costs and turn-by-turn gives directions along the
     /// road the walker actually chose.
     let option: RouteOption
+
+    /// Which of `waypoints` the city could route through. A point with no way
+    /// through leaves the route as it was, and this is how the view knows to
+    /// say so instead of accepting the press and changing nothing.
+    let reached: [Int]
 
     /// Which of `avoidances` the city could honour. A hill with no way round
     /// leaves the route as it was, and this is how the view knows to say so.
@@ -1344,6 +1441,9 @@ private struct PlannedRoute: Identifiable {
 
     /// The stretches that are on the route because the walker refused a hill.
     let detours: [Detour]
+
+    /// The waypoints the route reaches, as points to draw and to tap.
+    let stops: [Stop]
 
     /// The route drawn as consecutive runs, each a shade deeper than the last.
     ///
@@ -1414,6 +1514,22 @@ private struct PlannedRoute: Identifiable {
         let coordinates: [CLLocationCoordinate2D]
     }
 
+    /// A point the walker pressed, which the route now passes through.
+    ///
+    /// Drawn as a bare white dot: it is not a place, it has no name and nothing
+    /// to say, and the only thing it marks is that the line goes through here
+    /// because someone said so. Tapping it takes it back.
+    struct Stop: RouteMark {
+        /// The graph node it snapped to, which is unique along a route and is
+        /// also what the router is told to pass through.
+        let id: Int
+        let coordinate: CLLocationCoordinate2D
+
+        /// One point, so that a stop is hit-tested by the same code as the
+        /// stretches.
+        var coordinates: [CLLocationCoordinate2D] { [coordinate] }
+    }
+
     /// A stretch of route the walker's own refusal put there.
     ///
     /// Tapping one puts back the hill it was found to avoid, so it carries the
@@ -1427,15 +1543,38 @@ private struct PlannedRoute: Identifiable {
         let coordinates: [CLLocationCoordinate2D]
     }
 
-    init(base: RouteOption, avoidances: [AvoidedHill] = [], in graph: WalkingGraph) {
-        let detoured = HillDetour.apply(avoidances, to: base, in: graph)
+    /// The walker's two kinds of change, applied in the order they have to be.
+    ///
+    /// Steering first, then refusing hills. A waypoint says which way round the
+    /// walk goes and so decides what ground there is to object to; a refusal is
+    /// a local objection to ground the route already covers. Doing it the other
+    /// way would find a way around a hill on a route the waypoint is about to
+    /// replace.
+    init(
+        base: RouteOption,
+        waypoints: [Int] = [],
+        avoidances: [AvoidedHill] = [],
+        in graph: WalkingGraph
+    ) {
+        let steered = RouteVia.route(base, through: waypoints, in: graph)
+        let viaRoute = RouteOption(
+            id: base.id,
+            name: base.name,
+            nodes: steered.nodes,
+            edges: steered.edges,
+            metrics: RouteMetrics(edges: steered.edges, in: graph),
+            cost: base.cost
+        )
+        let detoured = HillDetour.apply(avoidances, to: viaRoute, in: graph)
         let coordinates = detoured.nodes.map { node in
             CLLocationCoordinate2D(latitude: graph.latitudes[node], longitude: graph.longitudes[node])
         }
 
         self.base = base
+        self.waypoints = waypoints
         self.avoidances = avoidances
         self.coordinates = coordinates
+        reached = steered.reached
         applied = detoured.applied
 
         // The name and the position on the card list survive: this is still the
@@ -1445,8 +1584,19 @@ private struct PlannedRoute: Identifiable {
             name: base.name,
             nodes: detoured.nodes,
             edges: detoured.edges,
-            metrics: RouteMetrics(edges: detoured.edges, in: graph)
+            metrics: RouteMetrics(edges: detoured.edges, in: graph),
+            cost: base.cost
         )
+
+        stops = steered.reached.map { node in
+            Stop(
+                id: node,
+                coordinate: CLLocationCoordinate2D(
+                    latitude: graph.latitudes[node],
+                    longitude: graph.longitudes[node]
+                )
+            )
+        }
 
         shades = Self.shades(along: coordinates)
 
@@ -1552,6 +1702,28 @@ private enum RoutePlan {
 }
 
 // MARK: - Markers
+
+/// A point the walker pressed to steer the route through.
+///
+/// A bare dot, with no label and no symbol. Every other mark on this map stands
+/// for something the app knows — where you are, where you are going — and says
+/// so. This one stands for nothing but the walker's own intention, which they do
+/// not need told back to them; a flag and the words "Dropped pin" made it look
+/// like a destination, which is the one thing it is not.
+///
+/// White rather than emerald: emerald is the route, and a stop is a hand on the
+/// route rather than a part of it. The ring is the map's own background, the
+/// same way the walker's marker is drawn, so the dot stays legible where it sits
+/// on top of the line.
+private struct StopMarker: View {
+    var body: some View {
+        Circle()
+            .fill(Theme.destination)
+            .overlay(Circle().stroke(Theme.background, lineWidth: 2.5))
+            .frame(width: 14, height: 14)
+            .shadow(color: .black.opacity(0.5), radius: 3)
+    }
+}
 
 /// The walker's own position, drawn rather than left to `UserAnnotation` so that
 /// it reads as part of the trip alongside the destination flag, not as an

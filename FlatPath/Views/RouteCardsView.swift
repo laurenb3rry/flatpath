@@ -106,13 +106,17 @@ private struct RouteCard: View {
 #Preview {
     @Previewable @State var selection: RouteOption.ID? = 1
 
+    let preference = WalkingCost(uphillSuffering: 1, ascentWeight: 6)
     let samples = [
         RouteOption(id: 0, name: "Flatter", nodes: [], edges: [],
-                    metrics: RouteMetrics(time: 18 * 60, elevationGain: 104, distance: 1_770)),
+                    metrics: RouteMetrics(time: 18 * 60, elevationGain: 104, distance: 1_770),
+                    cost: preference),
         RouteOption(id: 1, name: "Balanced", nodes: [], edges: [],
-                    metrics: RouteMetrics(time: 21 * 60, elevationGain: 37, distance: 1_930)),
+                    metrics: RouteMetrics(time: 21 * 60, elevationGain: 37, distance: 1_930),
+                    cost: preference),
         RouteOption(id: 2, name: "Flattest", nodes: [], edges: [],
-                    metrics: RouteMetrics(time: 24 * 60, elevationGain: 18, distance: 2_250)),
+                    metrics: RouteMetrics(time: 24 * 60, elevationGain: 18, distance: 2_250),
+                    cost: preference),
     ]
 
     return RouteCardsView(routes: samples, selection: $selection)

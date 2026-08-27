@@ -226,6 +226,22 @@ enum Theme {
     enum Line {
         /// The chosen route, drawn heaviest.
         static let selected: CGFloat = 5.5
+        /// About two thirds of a typical city street: prominent without
+        /// turning tight corners and endpoints into oversized pills.
+        static let streetWidthMeters: CGFloat = 8
+        static let maximumStreetWidth: CGFloat = 40
+
+        static func streetWidth(at metersPerPoint: Double) -> CGFloat {
+            min(maximumStreetWidth, max(selected, streetWidthMeters / CGFloat(max(metersPerPoint, 0.01))))
+        }
+
+        static func hillDotWidth(routeWidth: CGFloat) -> CGFloat {
+            routeWidth
+        }
+
+        static func hillDotSpacing(routeWidth: CGFloat) -> CGFloat {
+            routeWidth * 1.5
+        }
 
         /// The rest, drawn thinner so the pile reads as one answer and some
         /// context rather than three equal lines.
@@ -322,13 +338,13 @@ enum Theme {
         func body(content: Content) -> some View {
             let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
 
-            return content
+            return
+                content
                 // Clipped before it is backed, so that a selected row's wash
                 // and the rules between rows stop at the rounded corner instead
                 // of squaring it off from the inside.
                 .clipShape(shape)
-                .background(.ultraThinMaterial, in: shape)
-                .background(panelBackground.opacity(0.9), in: shape)
+                .background(panelBackground, in: shape)
                 .overlay {
                     // Catches the light along the top edge the way a raised
                     // surface does, which is what separates the panel from the
@@ -355,10 +371,10 @@ extension View {
     }
 }
 
-private extension Color {
+extension Color {
     /// Builds a color from a six-digit hex literal, so the tokens above can be
     /// written the way the design states them.
-    init(hex: UInt32) {
+    fileprivate init(hex: UInt32) {
         self.init(
             .sRGB,
             red: Double((hex >> 16) & 0xFF) / 255,

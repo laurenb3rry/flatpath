@@ -65,6 +65,13 @@ def _is_walkable(tags):
 
     highway = tags.get("highway")
     sidewalk = tags.get("sidewalk")
+
+    # The app renders its walking route as a street overlay. Dedicated OSM
+    # sidewalk ways run parallel to the same walkable road centerline and make
+    # the displayed route jump from the road onto the curb. Keep real paths and
+    # crossing footways, but route ordinary street travel on the street itself.
+    if highway == "footway" and tags.get("footway") == "sidewalk":
+        return False
     qualifies = (
         highway in WALKABLE_HIGHWAYS
         or (sidewalk is not None and sidewalk not in ("no", "none", "separate"))

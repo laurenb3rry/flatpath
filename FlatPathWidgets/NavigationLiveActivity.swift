@@ -99,19 +99,8 @@ private struct LockScreenView: View {
                         .foregroundStyle(Theme.primaryText)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if let following = state.following, !state.hasArrived {
-                        Text(following)
-                            .font(Theme.label(.caption))
-                            .foregroundStyle(Theme.secondaryText)
-                            .lineLimit(1)
-                    }
                 }
-
-                Spacer(minLength: 0)
-            }
-
-            if let climb = state.climb, !state.hasArrived {
-                ClimbWarning(climb: climb)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             RemainingRow(state: state, routeName: attributes.routeName)
@@ -135,22 +124,6 @@ private struct ManeuverGlyph: View {
     }
 }
 
-private struct ClimbWarning: View {
-    let climb: NavigationAttributes.Climb
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.up.forward")
-                .font(Theme.label(.caption2, weight: .bold))
-            Text(climb.percentage)
-                .font(Theme.figure(.caption2, weight: .semibold))
-            Text("climb")
-                .font(Theme.label(.caption2))
-        }
-        .foregroundStyle(Theme.warning(for: climb.grade) ?? Theme.moderate)
-    }
-}
-
 /// What is left of the walk: the same three figures the route was chosen by.
 private struct RemainingRow: View {
     let state: NavigationAttributes.ContentState
@@ -158,15 +131,19 @@ private struct RemainingRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(state.hasArrived ? "Arrived" : state.timeRemaining)
-                .foregroundStyle(Theme.primaryText)
-            Text("·").foregroundStyle(Theme.tertiaryText)
-            Text(state.distanceRemaining)
-            Text("·").foregroundStyle(Theme.tertiaryText)
-            Text(state.climbRemaining)
-            Text("·").foregroundStyle(Theme.tertiaryText)
-            Text(routeName)
-                .font(Theme.label(.caption))
+            HStack(spacing: 6) {
+                Text(state.hasArrived ? "Arrived" : state.timeRemaining)
+                    .foregroundStyle(Theme.primaryText)
+                Text("·").foregroundStyle(Theme.tertiaryText)
+                Text(state.distanceRemaining)
+            }
+            Spacer(minLength: 12)
+            HStack(spacing: 6) {
+                Text(state.climbRemaining)
+                Text("·").foregroundStyle(Theme.tertiaryText)
+                Text(routeName)
+                    .font(Theme.label(.caption))
+            }
         }
         .font(Theme.figure(.caption))
         .foregroundStyle(Theme.secondaryText)

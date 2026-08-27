@@ -153,6 +153,7 @@ struct MapContainerView: View {
                 route: walk.option,
                 graph: graph,
                 location: location,
+                destinationCoordinate: destination?.coordinate ?? walk.coordinates.last,
                 destination: destination.flatMap { place in
                     place.address?
                         .split(separator: ",", maxSplits: 1)
@@ -224,15 +225,22 @@ struct MapContainerView: View {
                     // shape laid over it: the hills are the part of the route
                     // the walker can argue with, and one is refused by tapping
                     // the dotted stretch.
-                    ForEach(selected.segments) { segment in
-                        if segment.isClimb {
-                            ForEach(dots(along: segment), id: \.id) { dot in
-                                MapPolyline(coordinates: dot.stub)
-                                    .stroke(segment.color, style: Theme.Line.dot)
-                            }
-                        } else {
-                            MapPolyline(coordinates: segment.coordinates)
-                                .stroke(segment.color, style: Theme.Line.stroke(Theme.Line.selected))
+            ForEach(visibleSegments(of: selected)) { segment in
+                    let shown = shownCoordinates(
+                        for: segment,
+                    isFinal: segment.id == visibleSegments(of: selected).last?.id
+                    )
+                    if segment.isClimb {
+                        ForEach(dots(along: shown, segmentID: segment.id), id: \.id) { dot in
+                            MapCircle(
+                                center: dot.coordinate,
+                                radius: Double(routeLineWidth) * groundScale / 2
+                            )
+                            .foregroundStyle(segment.color)
+                        }
+                    } else {
+                    MapPolyline(coordinates: shown)
+                        .stroke(segment.color, style: Theme.Line.stroke(routeLineWidth))
                         }
                     }
 
@@ -241,7 +249,7 @@ struct MapContainerView: View {
                     // findable to be taken back off it.
                     ForEach(selected.stops) { stop in
                         Annotation("", coordinate: stop.coordinate) {
-                            StopMarker()
+                            StopMarker(diameter: mapDotDiameter)
                         }
                         .annotationTitles(.hidden)
                     }
@@ -251,22 +259,16 @@ struct MapContainerView: View {
                 // from. It is the one thing on the map that is not a choice.
                 if let here = location.coordinate, ServiceArea.contains(here) {
                     Annotation("You", coordinate: here) {
-                        WalkerMarker()
-                    }
-                    .annotationTitles(.hidden)
-                }
-
-                if let routeStart = routes.first(where: { $0.id == selectedRoute })?.coordinates.first {
-                    Annotation("", coordinate: routeStart) {
-                        StartMarker()
+                    WalkerMarker(diameter: mapDotDiameter)
                     }
                     .annotationTitles(.hidden)
                 }
 
                 if let destination {
-                    Annotation("", coordinate: destination.coordinate) {
+                Annotation("", coordinate: destination.coordinate, anchor: .bottom) {
                         DestinationMarker()
                     }
+
                     .annotationTitles(.hidden)
                 }
             }
@@ -289,17 +291,63 @@ struct MapContainerView: View {
 
     /// One dot of a marked climb, identified by where it falls so that the run
     /// of them is a stable list to draw from.
+    private var routeLineWidth: CGFloat {
+        Theme.Line.streetWidth(at: groundScale)
+    }
+
+    private var mapDotDiameter: CGFloat {
+        min(18, max(12, routeLineWidth + 2))
+    }
+
     private struct RouteDot: Identifiable {
         let id: Int
-        let stub: [CLLocationCoordinate2D]
+        let coordinate: CLLocationCoordinate2D
     }
 
     /// The dots standing in for one climbing stretch of the route.
-    private func dots(along segment: PlannedRoute.Segment) -> [RouteDot] {
+    private func dots(along coordinates: [CLLocationCoordinate2D], segmentID: Int) -> [RouteDot] {
         RouteDots
-            .along(segment.coordinates, every: Double(Theme.Line.dotSpacing) * groundScale)
+            .along(
+                coordinates,
+                every: Double(Theme.Line.hillDotSpacing(routeWidth: routeLineWidth)) * groundScale
+            )
             .enumerated()
-            .map { RouteDot(id: segment.id << 16 | $0.offset, stub: $0.element) }
+            .map {
+                RouteDot(
+                    id: segmentID << 16 | $0.offset,
+                    coordinate: CLLocationCoordinate2D(
+                        latitude: ($0.element[0].latitude + $0.element[1].latitude) / 2,
+                        longitude: ($0.element[0].longitude + $0.element[1].longitude) / 2
+                    )
+                )
+            }
+    }
+
+    private func visibleSegments(of route: PlannedRoute) -> [PlannedRoute.Segment] {
+        guard let destination,
+              let ending = route.segments.min(by: {
+                  let left = RouteDisplayGeometry.endingBeforeDestination(
+                      $0.coordinates, destination: destination.coordinate, clearance: 0
+                  ).last?.distance(to: destination.coordinate) ?? .infinity
+                  let right = RouteDisplayGeometry.endingBeforeDestination(
+                      $1.coordinates, destination: destination.coordinate, clearance: 0
+                  ).last?.distance(to: destination.coordinate) ?? .infinity
+                  return left < right
+              })
+        else { return route.segments }
+        return Array(route.segments.prefix { $0.id <= ending.id })
+    }
+
+    private func shownCoordinates(
+        for segment: PlannedRoute.Segment,
+        isFinal: Bool
+    ) -> [CLLocationCoordinate2D] {
+        guard isFinal, let destination else { return segment.coordinates }
+        return RouteDisplayGeometry.endingBeforeDestination(
+            segment.coordinates,
+            destination: destination.coordinate,
+            clearance: 8
+        )
     }
 
     /// Note how much ground the map is currently showing, coarsely.
@@ -327,7 +375,7 @@ struct MapContainerView: View {
         let here = region.center
         let north = CLLocationCoordinate2D(latitude: here.latitude + degrees, longitude: here.longitude)
         guard let from = proxy.convert(here, to: .local),
-              let to = proxy.convert(north, to: .local)
+            let to = proxy.convert(north, to: .local)
         else { return }
 
         let points = hypot(to.x - from.x, to.y - from.y)
@@ -354,7 +402,7 @@ struct MapContainerView: View {
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onEnded { value in
                 guard case .second(_, let drag?) = value,
-                      let coordinate = proxy.convert(drag.location, from: .local)
+                    let coordinate = proxy.convert(drag.location, from: .local)
                 else { return }
                 dropPin(at: coordinate)
             }
@@ -403,10 +451,12 @@ struct MapContainerView: View {
     /// through, and the refusal has to happen here while there is still a
     /// gesture to attach it to.
     private func steer(_ route: PlannedRoute, through coordinate: CLLocationCoordinate2D) {
-        guard let stop = graph.nearestNode(
-            toLatitude: coordinate.latitude,
-            longitude: coordinate.longitude
-        ) else {
+        guard
+            let stop = graph.nearestNode(
+                toLatitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+        else {
             steeringProblem = "There is no walkable street near there."
             return
         }
@@ -437,7 +487,9 @@ struct MapContainerView: View {
         // dropped rather than queued. Both taps read the refusals off the route
         // as it stands, and the second would be built on a list the first has
         // not added to yet -- which would silently undo it.
-        guard !isRerouting, let selected = routes.first(where: { $0.id == selectedRoute }) else { return }
+        guard !isRerouting, let selected = routes.first(where: { $0.id == selectedRoute }) else {
+            return
+        }
 
         // A stop is a point rather than a stretch, so it is the most
         // deliberate thing on the line to aim at and is answered first. It also
@@ -504,8 +556,10 @@ struct MapContainerView: View {
 
         // A stop is one point rather than a stretch, and measuring it as a
         // segment of no length would divide by nothing.
-        let nearest = drawn.count > 1
-            ? zip(drawn, drawn.dropFirst()).map { point.distance(toSegmentFrom: $0, to: $1) }.min() ?? .infinity
+        let nearest =
+            drawn.count > 1
+            ? zip(drawn, drawn.dropFirst()).map { point.distance(toSegmentFrom: $0, to: $1) }.min()
+                ?? .infinity
             : hypot(point.x - first.x, point.y - first.y)
         return nearest <= Self.tapReach ? nearest : nil
     }
@@ -633,7 +687,7 @@ struct MapContainerView: View {
 
 // MARK: - Search
 
-private extension MapContainerView {
+extension MapContainerView {
     /// The search card, and the dimmed map behind it.
     ///
     /// There is no permanent search bar. A field pinned to the top of the map is
@@ -644,7 +698,7 @@ private extension MapContainerView {
     /// row: tapping either end of the trip brings that row up here and turns it
     /// into a search box.
     @ViewBuilder
-    var searchLayer: some View {
+    fileprivate var searchLayer: some View {
         if let end = searching {
             ZStack(alignment: .top) {
                 Color.clear
@@ -652,17 +706,14 @@ private extension MapContainerView {
                     .contentShape(.rect)
                     .onTapGesture { dismissSearch() }
 
-                VStack(spacing: 8) {
-                    searchHeader(for: end)
-                    searchCard(for: end, resultsLimit: 300)
-                }
+                searchCard(for: end, resultsLimit: 300)
                 .padding(.horizontal, Theme.Inset.card)
                 .padding(.top, Theme.Inset.cardTop)
             }
         }
     }
 
-    func searchHeader(for end: Endpoint) -> some View {
+    fileprivate func searchHeader(for end: Endpoint) -> some View {
         HStack(spacing: 8) {
             Text(end.sheetTitle)
                 .font(Theme.label(.footnote, weight: .medium))
@@ -688,7 +739,7 @@ private extension MapContainerView {
     /// destination leaves it where it is. In both cases the row being typed into
     /// and the places on offer are adjacent, and the row is never the thing that
     /// moved out from under the walker's finger.
-    func searchCard(for end: Endpoint, resultsLimit: CGFloat) -> some View {
+    fileprivate func searchCard(for end: Endpoint, resultsLimit: CGFloat) -> some View {
         VStack(spacing: 0) {
             endpointField(.start, activeEnd: end)
 
@@ -717,7 +768,7 @@ private extension MapContainerView {
     /// One end of the trip inside the card: a search box while it is the one
     /// being filled, and what it currently holds while it is not.
     @ViewBuilder
-    func endpointField(_ end: Endpoint, activeEnd: Endpoint) -> some View {
+    fileprivate func endpointField(_ end: Endpoint, activeEnd: Endpoint) -> some View {
         let isActive = end == activeEnd
 
         VStack(alignment: .leading, spacing: 8) {
@@ -727,9 +778,9 @@ private extension MapContainerView {
                     .foregroundStyle(fieldSymbolColor(for: end, isActive: isActive))
                     .frame(width: 16)
 
-                Text(end.title)
-                    .font(Theme.label(.caption, weight: .semibold))
-                    .foregroundStyle(isActive ? Theme.accent : Theme.secondaryText)
+            Text(end.title)
+                .font(Theme.label(.caption, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
 
                 Spacer(minLength: 8)
             }
@@ -758,7 +809,7 @@ private extension MapContainerView {
         }
     }
 
-    func searchBox(for end: Endpoint) -> some View {
+    fileprivate func searchBox(for end: Endpoint) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(Theme.label(.footnote, weight: .medium))
@@ -797,7 +848,7 @@ private extension MapContainerView {
     /// why there are none, or -- before anything has been typed -- the other way
     /// of answering the question.
     @ViewBuilder
-    func resultSection(for end: Endpoint, maxHeight: CGFloat) -> some View {
+    fileprivate func resultSection(for end: Endpoint, maxHeight: CGFloat) -> some View {
         if !search.results.isEmpty {
             ScrollView {
                 VStack(spacing: 0) {
@@ -821,21 +872,15 @@ private extension MapContainerView {
             .frame(height: min(maxHeight, CGFloat(search.results.count) * Self.searchResultHeight))
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.never)
-        } else {
+        } else if end == .start {
             VStack(alignment: .leading, spacing: 10) {
-                if end == .start {
-                    Button("Use my location") {
-                        clear(.start)
-                        dismissSearch()
-                    }
-                    .font(Theme.label(.footnote, weight: .medium))
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.secondaryText)
+                Button("Use my location") {
+                    clear(.start)
+                    dismissSearch()
                 }
-
-                Text(searchHint(for: end))
-                    .font(Theme.label(.footnote))
-                    .foregroundStyle(Theme.tertiaryText)
+                .font(Theme.label(.footnote, weight: .medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.secondaryText)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
@@ -845,7 +890,7 @@ private extension MapContainerView {
 
     private static let searchResultHeight: CGFloat = 61
 
-    func resultRow(_ result: Destination) -> some View {
+    fileprivate func resultRow(_ result: Destination) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(result.name)
                 .font(Theme.label(.subheadline, weight: .medium))
@@ -869,7 +914,7 @@ private extension MapContainerView {
     /// been typed, not enough has been typed, the answer is still coming, or
     /// there is genuinely no such place here. Saying "no matches" for the first
     /// three would accuse the walker of a mistake they have not made yet.
-    func searchHint(for end: Endpoint) -> String {
+    fileprivate func searchHint(for end: Endpoint) -> String {
         let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if typed.isEmpty {
@@ -890,7 +935,7 @@ private extension MapContainerView {
     /// from each other by these alone -- no borders, no shadows on anything
     /// anchored to an edge -- so that the map keeps the screen and the panels
     /// read as edges of it rather than as windows floating over it.
-    var hairline: some View {
+    fileprivate var hairline: some View {
         Rectangle()
             .fill(Theme.hairline)
             .frame(height: 1 / displayScale)
@@ -899,7 +944,7 @@ private extension MapContainerView {
 
 // MARK: - Trip summary
 
-private extension MapContainerView {
+extension MapContainerView {
     /// The two ends of the trip as they currently stand, and what is missing.
     ///
     /// Both ends are editable and both are addressed the same way. The start
@@ -912,7 +957,7 @@ private extension MapContainerView {
     /// press or a search actually landed, so it says what was captured rather
     /// than only prompting for what was not.
     @ViewBuilder
-    var tripSummary: some View {
+    fileprivate var tripSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 // Leading, where it is under the thumb that just tapped a row
@@ -962,36 +1007,38 @@ private extension MapContainerView {
     /// The mark beside an end of the trip. The start changes symbol with its
     /// meaning: a heading arrow while it follows the walker, a fixed dot once
     /// they have named somewhere.
-    func symbol(for end: Endpoint) -> String {
+    fileprivate func symbol(for end: Endpoint) -> String {
         switch end {
         case .start: origin == nil ? "location.fill" : "smallcircle.filled.circle"
-        case .destination: "flag.fill"
+        case .destination: "mappin.and.ellipse"
         }
     }
 
     /// The walker's own position is the now-marker on the map, and the accent
     /// belongs to it. A start they typed is a place like any other, so it is
     /// drawn like one.
-    func tint(for end: Endpoint) -> Color {
+    fileprivate func tint(for end: Endpoint) -> Color {
         switch end {
         case .start: origin == nil ? Theme.accent : Theme.destination
-        case .destination: Theme.destination
+        case .destination: Theme.accent
         }
     }
 
-    func isSet(_ end: Endpoint) -> Bool {
+    fileprivate func isSet(_ end: Endpoint) -> Bool {
         switch end {
         case .start: start != nil
         case .destination: destination != nil
         }
     }
 
-    func detail(for end: Endpoint) -> String {
+    fileprivate func detail(for end: Endpoint) -> String {
         switch end {
         case .start: startDetail
         case .destination:
-            destination.map { $0.address ?? $0.name }
-                ?? "Tap to search, or press and hold the map"
+            destination.map {
+                let address = $0.address ?? $0.name
+                return address.split(separator: ",", maxSplits: 1).first.map(String.init) ?? address
+            } ?? "Tap to search, or press and hold the map"
         }
     }
 
@@ -1001,15 +1048,16 @@ private extension MapContainerView {
     /// numbers, so an address gets the reading face and a latitude and longitude
     /// get the monospaced one. Setting "221 Kearny St, San Francisco" in figures
     /// spaces the words like a table and looks like a rendering fault.
-    func detailFont(for end: Endpoint) -> Font {
-        let named = switch end {
-        case .start: origin?.isNamed ?? false
-        case .destination: destination?.isNamed ?? false
-        }
+    fileprivate func detailFont(for end: Endpoint) -> Font {
+        let named =
+            switch end {
+            case .start: origin?.isNamed ?? false
+            case .destination: destination?.isNamed ?? false
+            }
         return named || !isSet(end) ? Theme.label(.footnote) : Theme.figure(.footnote)
     }
 
-    func fieldSymbolColor(for end: Endpoint, isActive: Bool) -> Color {
+    fileprivate func fieldSymbolColor(for end: Endpoint, isActive: Bool) -> Color {
         if isActive { return Theme.accent }
         return isSet(end) ? tint(for: end) : Theme.tertiaryText
     }
@@ -1022,7 +1070,7 @@ private extension MapContainerView {
     /// Retyping both ends to see them would be the app asking the walker to do
     /// its work.
     @ViewBuilder
-    var swapButton: some View {
+    fileprivate var swapButton: some View {
         Button {
             withAnimation(Theme.Motion.selection) { swapEndpoints() }
         } label: {
@@ -1039,11 +1087,11 @@ private extension MapContainerView {
 
     /// Swapping needs somewhere for each end to land. With no destination set
     /// and no fix to fall back on there is nothing to exchange.
-    var canSwap: Bool {
+    fileprivate var canSwap: Bool {
         destination != nil || origin != nil
     }
 
-    func swapEndpoints() {
+    fileprivate func swapEndpoints() {
         // The start has to be made explicit before it can become a destination:
         // "wherever I am" is a rule for one end of a trip, not a place.
         let newDestination = origin ?? myLocation
@@ -1059,7 +1107,7 @@ private extension MapContainerView {
 
     /// Where the walker is, as a place that can be named and swapped, or `nil`
     /// when there is no fix worth using.
-    var myLocation: Destination? {
+    fileprivate var myLocation: Destination? {
         guard let coordinate = location.coordinate, ServiceArea.contains(coordinate) else {
             return nil
         }
@@ -1071,7 +1119,7 @@ private extension MapContainerView {
         )
     }
 
-    var startDetail: String {
+    fileprivate var startDetail: String {
         if let origin {
             origin.address ?? origin.name
         } else if let start {
@@ -1092,17 +1140,18 @@ private extension MapContainerView {
     /// them -- there is no separate mode to leave, because choosing something
     /// ends it.
     @ViewBuilder
-    func endpoint(_ end: Endpoint, trailing: String? = nil) -> some View {
+    fileprivate func endpoint(_ end: Endpoint, trailing: String? = nil) -> some View {
         // Which end a press on the map would set. Worth marking, because the
         // gesture is silent about its target and the walker is owed a way to
         // tell before they use it.
-        let isTargeted = editing == end
         let isSet = isSet(end)
 
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol(for: end))
                 .font(Theme.label(.caption))
-                .foregroundStyle(isSet ? tint(for: end) : Theme.tertiaryText)
+                .foregroundStyle(
+                    end == .destination ? Theme.accent : (isSet ? tint(for: end) : Theme.tertiaryText)
+                )
                 .frame(width: 16)
 
             Button {
@@ -1111,7 +1160,7 @@ private extension MapContainerView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(end.title)
                         .font(Theme.label(.caption, weight: .semibold))
-                        .foregroundStyle(isTargeted ? Theme.accent : Theme.secondaryText)
+                    .foregroundStyle(Theme.secondaryText)
                     // A set endpoint is a place or a coordinate, which reads as
                     // a figure; an unset one is a sentence asking for one.
                     Text(detail(for: end))
@@ -1138,7 +1187,7 @@ private extension MapContainerView {
         .frame(height: Self.endpointRowHeight)
     }
 
-    func clear(_ end: Endpoint) {
+    fileprivate func clear(_ end: Endpoint) {
         switch end {
         case .start:
             origin = nil
@@ -1152,7 +1201,7 @@ private extension MapContainerView {
 
 // MARK: - Routes
 
-private extension MapContainerView {
+extension MapContainerView {
     /// The chooser and the trip strip, as one sheet floating over the map.
     ///
     /// The strip stays put once routes arrive rather than being replaced by
@@ -1165,7 +1214,7 @@ private extension MapContainerView {
     /// stacked rather than one surface. Inset from all three edges, rounded, and
     /// blurred over the ground it covers, the same content reads as something
     /// laid on the map, which is what it is.
-    var tripPanel: some View {
+    fileprivate var tripPanel: some View {
         VStack(spacing: 0) {
             if !routes.isEmpty {
                 detourControl
@@ -1202,7 +1251,7 @@ private extension MapContainerView {
     /// grays that cannot be told to join the palette. At this size the control
     /// is a track, three labels and a moving fill, and drawing it is cheaper
     /// than the one gray rectangle it saves.
-    var detourControl: some View {
+    fileprivate var detourControl: some View {
         HStack(spacing: 12) {
             Text("Detour allowed")
                 .font(Theme.label(.footnote))
@@ -1267,7 +1316,7 @@ private extension MapContainerView {
     /// this: progress belongs in the place the answer will appear, not tucked
     /// into a corner of the field that asked the question.
     @ViewBuilder
-    var actionRow: some View {
+    fileprivate var actionRow: some View {
         if isRouting {
             // The spinner alone. Naming what it is doing would be a caption on
             // a wait of a few hundred milliseconds, and the strip it sits in has
@@ -1299,7 +1348,7 @@ private extension MapContainerView {
     /// One height for both states of the action strip, so the panel does not
     /// change depth when the spinner gives way to the button and the cards above
     /// stay where the walker last read them.
-    static var actionHeight: CGFloat { 44 }
+    fileprivate static var actionHeight: CGFloat { 44 }
 
     /// What a set of routes is a function of. Planning restarts when this
     /// changes, and only then.
@@ -1310,14 +1359,14 @@ private extension MapContainerView {
     /// they had just made. The arrival of the first fix does have to trigger a
     /// plan, though, since a destination can be set before there is anywhere to
     /// route from.
-    struct PlanRequest: Equatable {
+    fileprivate struct PlanRequest: Equatable {
         let origin: Destination.ID?
         let destination: Destination.ID?
         let hasStart: Bool
         let detour: DetourTolerance
     }
 
-    var planRequest: PlanRequest {
+    fileprivate var planRequest: PlanRequest {
         PlanRequest(
             origin: origin?.id,
             destination: destination?.id,
@@ -1327,7 +1376,7 @@ private extension MapContainerView {
     }
 
     /// Find the routes for the current pair of endpoints, if there is one.
-    func planRoutes() async {
+    fileprivate func planRoutes() async {
         // Whatever a walker refused on the last set of routes was a statement
         // about those routes. A new pair of endpoints is a new walk, and it
         // arrives with nothing refused on it.
@@ -1384,7 +1433,7 @@ private extension MapContainerView {
         }
     }
 
-    func discardRoutes() {
+    fileprivate func discardRoutes() {
         routes = []
         selectedRoute = nil
         steeringProblem = nil
@@ -1541,12 +1590,12 @@ private struct PlannedRoute: Identifiable {
 
         return runs.sorted { $0.lowerBound < $1.lowerBound }.reduce(into: []) { spans, run in
             guard let last = spans.last,
-                  travelled[run.lowerBound] - travelled[last.upperBound] <= bridgedGap
+                travelled[run.lowerBound] - travelled[last.upperBound] <= bridgedGap
             else {
                 spans.append(run)
                 return
             }
-            spans[spans.count - 1] = last.lowerBound ... max(last.upperBound, run.upperBound)
+            spans[spans.count - 1] = last.lowerBound...max(last.upperBound, run.upperBound)
         }
     }
 
@@ -1577,11 +1626,7 @@ private struct PlannedRoute: Identifiable {
         // Integer arithmetic so the shade runs tile the route exactly: each one
         // ends on the index the next begins on, with no coordinate dropped
         // between them and none drawn twice.
-        let shades = min(Theme.routeShadeCount, spans)
         var cuts: Set<Int> = [0, spans]
-        for shade in 1 ..< max(1, shades) {
-            cuts.insert(shade * spans / shades)
-        }
 
         // A climb is one run whatever the shading would have done to it. The
         // dots along it are spaced from its own length, so cutting a hill in
@@ -1602,7 +1647,7 @@ private struct PlannedRoute: Identifiable {
             return Segment(
                 id: position,
                 color: Theme.accent,
-                coordinates: Array(coordinates[from ... through]),
+                coordinates: Array(coordinates[from...through]),
                 // Every boundary of every climb is a cut, so a run either lies
                 // inside one for its whole length or lies outside every one;
                 // testing where it starts settles it.
@@ -1770,7 +1815,7 @@ private struct PlannedRoute: Identifiable {
             var last = position
             while last + 1 < edges, mark(last + 1) == found { last += 1 }
 
-            runs.append((nodes: position ... last + 1, mark: found))
+            runs.append((nodes: position...last + 1, mark: found))
             position = last + 1
         }
 
@@ -1799,11 +1844,15 @@ private enum RoutePlan {
         // coordinate from CoreLocation or from a search result almost never
         // lands on a node exactly, and the graph is the only thing that can say
         // whether "almost" is close enough to route from.
-        guard let origin = graph.nearestNode(toLatitude: start.latitude, longitude: start.longitude) else {
+        guard let origin = graph.nearestNode(toLatitude: start.latitude, longitude: start.longitude)
+        else {
             self = .startOffNetwork
             return
         }
-        guard let goal = graph.nearestNode(toLatitude: destination.latitude, longitude: destination.longitude) else {
+        guard
+            let goal = graph.nearestNode(
+                toLatitude: destination.latitude, longitude: destination.longitude)
+        else {
             self = .destinationOffNetwork
             return
         }
@@ -1835,12 +1884,15 @@ private enum RoutePlan {
 /// same way the walker's marker is drawn, so the dot stays legible where it sits
 /// on top of the line.
 private struct StopMarker: View {
+    let diameter: CGFloat
+
     var body: some View {
-        Circle()
-            .fill(Theme.destination)
-            .overlay(Circle().stroke(Theme.background, lineWidth: 2.5))
-            .frame(width: 14, height: 14)
-            .shadow(color: .black.opacity(0.5), radius: 3)
+        Rectangle()
+            .fill(Color.white)
+            .frame(width: (diameter + 4) * 0.7071, height: (diameter + 4) * 0.7071)
+            .rotationEffect(.degrees(45))
+            .frame(width: diameter + 4, height: diameter + 4)
+            .shadow(color: .black.opacity(0.5), radius: 2)
     }
 }
 
@@ -1848,23 +1900,25 @@ private struct StopMarker: View {
 /// it reads as part of the trip alongside the destination flag, not as an
 /// unrelated system dot that happens to share the map.
 private struct WalkerMarker: View {
+    let diameter: CGFloat
+
     var body: some View {
         Circle()
             .fill(Color.white)
-            .frame(width: 12, height: 12)
+            .frame(width: diameter, height: diameter)
             .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 
 // MARK: - Geometry helpers
 
-private extension CLLocationCoordinate2D {
+extension CLLocationCoordinate2D {
     /// Meters between two coordinates, near enough.
     ///
     /// The equirectangular approximation the rest of the app measures short
     /// distances with. Over the tens of meters this is asked about it agrees
     /// with a proper distance to well inside the accuracy of the nodes.
-    func distance(to other: CLLocationCoordinate2D) -> Double {
+    fileprivate func distance(to other: CLLocationCoordinate2D) -> Double {
         let metersPerDegree = 111_320.0
         let northing = (other.latitude - latitude) * metersPerDegree
         let easting = (other.longitude - longitude) * metersPerDegree * cos(latitude * .pi / 180)
@@ -1872,11 +1926,11 @@ private extension CLLocationCoordinate2D {
     }
 }
 
-private extension CGPoint {
+extension CGPoint {
     /// How far this point lies from a line segment, which is what a tap on a
     /// polyline is asking. Measuring to the drawn vertices instead would let a
     /// tap in the middle of a long straight block miss the block.
-    func distance(toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {
+    fileprivate func distance(toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {
         let run = CGPoint(x: end.x - start.x, y: end.y - start.y)
         let lengthSquared = run.x * run.x + run.y * run.y
         guard lengthSquared > 0 else { return hypot(x - start.x, y - start.y) }
@@ -1888,10 +1942,10 @@ private extension CGPoint {
     }
 }
 
-private extension MKCoordinateRegion {
+extension MKCoordinateRegion {
     /// Expands and shifts a region so its original contents are centered in the
     /// upper, unobscured part of a full-screen map.
-    func reservingBottomFraction(_ fraction: Double) -> MKCoordinateRegion {
+    fileprivate func reservingBottomFraction(_ fraction: Double) -> MKCoordinateRegion {
         let reserved = min(max(fraction, 0), 0.8)
         let visible = 1 - reserved
         let expandedLatitude = span.latitudeDelta / visible
@@ -1915,7 +1969,7 @@ private extension MKCoordinateRegion {
     /// not sit against the screen edge, and floored so that a single point — or
     /// two a few meters apart — produces a street-level view instead of zooming
     /// to a span of zero.
-    init?(containing coordinates: [CLLocationCoordinate2D]) {
+    fileprivate init?(containing coordinates: [CLLocationCoordinate2D]) {
         guard let first = coordinates.first else { return nil }
 
         var minimum = first

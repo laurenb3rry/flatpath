@@ -30,6 +30,7 @@ struct NavigationView: View {
     /// The walker's position, shared with the map screen behind this one so that
     /// both read the same filtered fix rather than each running their own.
     let location: LocationManager
+    let destinationCoordinate: CLLocationCoordinate2D?
 
     /// Where the walk ends, as the walker named it. Shown outside the app,
     /// where "Flattest" alone would not say which trip is in progress.
@@ -48,16 +49,22 @@ struct NavigationView: View {
 
     /// Whether the whole list of directions is pulled down over the map.
     @State private var showsAllSteps = false
+    @State private var groundScale = 0.5
+    @State private var followsLocation = true
+    @State private var directionsHeight: CGFloat = 0
+    @State private var arrivalTask: Task<Void, Never>?
 
     init(
         route: RouteOption,
         graph: WalkingGraph,
         location: LocationManager,
+        destinationCoordinate: CLLocationCoordinate2D?,
         destination: String,
         onEnd: @escaping () -> Void
     ) {
         self.route = route
         self.location = location
+        self.destinationCoordinate = destinationCoordinate
         self.destination = destination
         self.onEnd = onEnd
         coordinates = route.nodes.map {
@@ -80,7 +87,7 @@ struct NavigationView: View {
 
     var body: some View {
         map
-            .safeAreaInset(edge: .top, spacing: 0) { banner }
+            .overlay(alignment: .top) { banner.safeAreaPadding(.top) }
             .safeAreaInset(edge: .bottom, spacing: 0) { footer }
             .task {
                 // Tracking carries on with the app off screen for as long as
@@ -92,6 +99,7 @@ struct NavigationView: View {
                 follow(fix)
             }
             .onDisappear {
+                arrivalTask?.cancel()
                 location.stopNavigating()
                 live.end()
             }
@@ -127,15 +135,29 @@ struct NavigationView: View {
         withAnimation(Theme.Motion.instruction) { follower.advance(to: fix.coordinate) }
         live.update(published)
 
+        if follower.hasArrived, arrivalTask == nil {
+            arrivalTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { return }
+                onEnd()
+            }
+        }
+
         // Turned to the heading of the stretch being walked, so that what is
         // ahead on the screen is what is ahead of the walker. Before the first
         // maneuver there is no stretch behind them, so the route's opening
         // heading stands in.
+        if followsLocation { centerOnLocation() }
+    }
+
+    private func centerOnLocation() {
+        guard let fix else { return }
+        followsLocation = true
         let heading = follower.underfoot?.bearing ?? follower.pending?.bearing ?? 0
         withAnimation(Theme.Motion.camera) {
             camera = .camera(
                 MapCamera(
-                    centerCoordinate: fix.coordinate,
+                    centerCoordinate: snappedToRoute(fix.coordinate),
                     distance: Self.followDistance,
                     heading: heading
                 )
@@ -146,35 +168,90 @@ struct NavigationView: View {
     // MARK: Map
 
     private var map: some View {
-        Map(position: $camera) {
-            MapPolyline(coordinates: coordinates)
-                .stroke(Theme.accent, style: Theme.Line.stroke(Theme.Line.selected))
+        MapReader { proxy in
+            Map(position: $camera) {
+                MapPolyline(coordinates: displayCoordinates)
+                    .stroke(Theme.accent, style: Theme.Line.stroke(routeLineWidth))
 
-            // The corner the instruction is talking about, marked so that the
-            // sentence and the map are pointing at the same place. Not on the
-            // last step, where the destination mark below is already on it.
-            if let pending = follower.pending, !follower.isFinishing {
-                Annotation("Next turn", coordinate: pending.coordinate) {
-                    ManeuverMarker(symbol: pending.symbol)
+                if let destination = destinationCoordinate {
+                Annotation(self.destination, coordinate: destination, anchor: .bottom) {
+                        DestinationMarker()
+                    }
                 }
-                .annotationTitles(.hidden)
+
+                if let fix {
+                    Annotation("You", coordinate: snappedToRoute(fix.coordinate)) {
+                        WalkerMarker(diameter: routeLineWidth + 5)
+                    }
+                    .annotationTitles(.hidden)
+                }
             }
-
-            if let destination = coordinates.last {
-                Annotation(self.destination, coordinate: destination) {
-                    DestinationMarker()
-                }
+            .mapStyle(Theme.mapStyle)
+            .mapControls { MapCompass() }
+            .onMapCameraChange(frequency: .continuous) { context in
+                measureGround(of: context.region, using: proxy)
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 2).onChanged { _ in followsLocation = false }
+            )
+            .simultaneousGesture(
+                MagnifyGesture().onChanged { _ in followsLocation = false }
+            )
+        }
+    }
 
-            if let fix {
-                Annotation("You", coordinate: fix.coordinate) {
-                    WalkerMarker()
-                }
-                .annotationTitles(.hidden)
+    private var routeLineWidth: CGFloat { Theme.Line.streetWidth(at: groundScale) }
+
+    private var displayCoordinates: [CLLocationCoordinate2D] {
+        guard let destinationCoordinate else { return coordinates }
+        return RouteDisplayGeometry.endingBeforeDestination(
+            coordinates,
+            destination: destinationCoordinate,
+            clearance: 8
+        )
+    }
+
+    private func measureGround(of region: MKCoordinateRegion, using proxy: MapProxy) {
+        let degrees = region.span.latitudeDelta / 4
+        guard degrees > 0 else { return }
+        let center = region.center
+        let north = CLLocationCoordinate2D(
+            latitude: center.latitude + degrees, longitude: center.longitude)
+        guard let from = proxy.convert(center, to: .local),
+            let to = proxy.convert(north, to: .local)
+        else { return }
+        let points = hypot(to.x - from.x, to.y - from.y)
+        guard points > 0 else { return }
+        groundScale = degrees * 111_320 / Double(points)
+    }
+
+    private func snappedToRoute(_ point: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+        var result = coordinates.first ?? point
+        var nearest = Double.greatestFiniteMagnitude
+        for (start, end) in zip(coordinates, coordinates.dropFirst()) {
+            let latitudeScale = 111_320.0
+            let longitudeScale = latitudeScale * cos(start.latitude * .pi / 180)
+            let px = (point.longitude - start.longitude) * longitudeScale
+            let py = (point.latitude - start.latitude) * latitudeScale
+            let sx = (end.longitude - start.longitude) * longitudeScale
+            let sy = (end.latitude - start.latitude) * latitudeScale
+            let lengthSquared = sx * sx + sy * sy
+            let fraction =
+                lengthSquared > 0
+                ? min(1, max(0, (px * sx + py * sy) / lengthSquared))
+                : 0
+            let dx = px - sx * fraction
+            let dy = py - sy * fraction
+            let offset = dx * dx + dy * dy
+            if offset < nearest {
+                nearest = offset
+                result = CLLocationCoordinate2D(
+                    latitude: start.latitude + (end.latitude - start.latitude) * fraction,
+                    longitude: start.longitude + (end.longitude - start.longitude) * fraction
+                )
             }
         }
-        .mapStyle(Theme.mapStyle)
-        .mapControls { MapCompass() }
+        return result
     }
 
     // MARK: Instruction
@@ -206,24 +283,29 @@ struct NavigationView: View {
             HStack(alignment: .top, spacing: 14) {
                 // The instruction in hand is the active thing on this screen,
                 // which is what the accent is for.
-                Image(systemName: hasArrived ? "mappin.and.ellipse" : (follower.pending?.symbol ?? "figure.walk"))
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 44)
-                    .contentTransition(.symbolEffect(.replace))
+                Image(
+                    systemName: hasArrived
+                        ? "mappin.and.ellipse" : (follower.pending?.symbol ?? "figure.walk")
+                )
+                .font(.system(size: 32, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 44)
+                .contentTransition(.symbolEffect(.replace))
 
                 VStack(alignment: .leading, spacing: 3) {
-                    if let distance = distanceToManeuver, !hasArrived {
-                        Text(distance)
-                            .font(Theme.figure(.title2, weight: .semibold))
-                            .foregroundStyle(Theme.primaryText)
-                            .contentTransition(.numericText())
+                if let distance = distanceToManeuver, !hasArrived {
+                    Text(distance)
+                        .font(.system(size: 32, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.primaryText)
+                        .contentTransition(.numericText())
                     }
 
-                    Text(hasArrived ? "You have arrived" : (follower.pending?.instruction ?? "Follow the route"))
-                        .font(Theme.label(.title3, weight: .medium))
-                        .foregroundStyle(Theme.primaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        hasArrived ? "You have arrived" : (follower.pending?.instruction ?? "Follow the route")
+                    )
+                    .font(Theme.label(.title3, weight: .medium))
+                    .foregroundStyle(Theme.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 0)
@@ -241,13 +323,6 @@ struct NavigationView: View {
                 climbWarning
             }
 
-            if let next = follower.following, !hasArrived {
-                hairline
-                Text("then \(next.instruction.sentenceContinuation)")
-                    .font(Theme.label(.subheadline))
-                    .foregroundStyle(Theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
 
             if let notice {
                 hairline
@@ -294,7 +369,7 @@ struct NavigationView: View {
     /// block it was warning them about.
     @ViewBuilder
     private var climbWarning: some View {
-        if let color = Theme.warning(for: Grade(slope: steepest)) {
+        if Theme.warning(for: Grade(slope: steepest)) != nil {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.up.forward")
                     .font(Theme.label(.caption, weight: .bold))
@@ -303,7 +378,8 @@ struct NavigationView: View {
                 Text("climb")
                     .font(Theme.label(.caption))
             }
-            .foregroundStyle(color)
+            .foregroundStyle(Theme.primaryText)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -317,7 +393,7 @@ struct NavigationView: View {
     private var allSteps: some View {
         ScrollViewReader { scroller in
             ScrollView {
-                LazyVStack(spacing: 0) {
+                VStack(spacing: 0) {
                     ForEach(follower.steps) { step in
                         StepRow(
                             step: step,
@@ -327,10 +403,13 @@ struct NavigationView: View {
                         .id(step.id)
                     }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    directionsHeight = $0
+                }
             }
             // Tall enough to hold a handful of turns, short enough that the map
             // and the walker's position on it are never entirely covered.
-            .frame(maxHeight: 320)
+            .frame(height: min(320, directionsHeight))
             .onAppear {
                 // Open at the instruction in hand rather than at the start of a
                 // walk that may be an hour behind them.
@@ -340,9 +419,13 @@ struct NavigationView: View {
     }
 
     private func state(of step: ManeuverStep) -> StepRow.State {
-        if step.id < follower.index { .walked }
-        else if step.id == follower.index { .current }
-        else { .ahead }
+        if step.id < follower.index {
+            .walked
+        } else if step.id == follower.index {
+            .current
+        } else {
+            .ahead
+        }
     }
 
     /// Meters to the corner ahead, in the same units as the cards. Shown only
@@ -376,8 +459,17 @@ struct NavigationView: View {
         // way out to the *last* line of the figures beside it -- the small one
         // -- which left it sitting against the bottom of the panel instead of
         // on it.
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(spacing: 8) {
+            if !followsLocation {
+                Button("- back to loc -", action: centerOnLocation)
+                    .font(Theme.label(.footnote))
+                    .foregroundStyle(Theme.accent)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("Back to current location")
+            }
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
                 // A duration is never rounded down to nothing, so standing at
                 // the destination would otherwise be reported as a minute away.
                 Text(hasArrived ? "Arrived" : WalkingFigures.duration(seconds: follower.timeRemaining))
@@ -417,6 +509,7 @@ struct NavigationView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("End the walk")
         }
+        }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -428,23 +521,21 @@ struct NavigationView: View {
 
 // MARK: - Publishing
 
-private extension NavigationView {
+extension NavigationView {
     /// The walk as the Lock Screen and the Dynamic Island show it.
     ///
     /// Every figure is formatted here rather than in the extension, and every
     /// one of them is the same value this screen is displaying — the walker
     /// glancing at a locked phone is reading the same instruction they would
     /// see by unlocking it.
-    var published: NavigationAttributes.ContentState {
+    fileprivate var published: NavigationAttributes.ContentState {
         NavigationAttributes.ContentState(
             instruction: hasArrived
                 ? "You have arrived"
                 : (follower.pending?.instruction ?? "Follow the route"),
             distanceToManeuver: hasArrived ? nil : distanceToManeuver,
             symbol: hasArrived ? "mappin.and.ellipse" : (follower.pending?.symbol ?? "figure.walk"),
-            following: hasArrived
-                ? nil
-                : follower.following.map { "then \($0.instruction.sentenceContinuation)" },
+            following: nil,
             timeRemaining: WalkingFigures.duration(seconds: follower.timeRemaining),
             distanceRemaining: WalkingFigures.distance(meters: follower.distanceRemaining),
             climbRemaining: WalkingFigures.climb(meters: follower.climbRemaining),
@@ -453,7 +544,7 @@ private extension NavigationView {
         )
     }
 
-    var publishedClimb: NavigationAttributes.Climb? {
+    fileprivate var publishedClimb: NavigationAttributes.Climb? {
         let grade = Grade(slope: steepest)
         guard grade.isWorthWarningAbout else { return nil }
         return NavigationAttributes.Climb(grade: grade, percentage: WalkingFigures.grade(steepest))
@@ -490,10 +581,10 @@ private struct StepRow: View {
                 if !isLast {
                     HStack(spacing: 6) {
                         Text(WalkingFigures.distance(meters: step.distance))
-                        if let color = Theme.warning(for: step.grade) {
+                    if Theme.warning(for: step.grade) != nil {
                             Text("·").foregroundStyle(Theme.tertiaryText)
-                            Text("\(WalkingFigures.grade(step.steepest)) climb")
-                                .foregroundStyle(color)
+                    Text("\(WalkingFigures.grade(step.steepest)) climb")
+                        .foregroundStyle(state == .walked ? Theme.tertiaryText : Theme.secondaryText)
                         }
                     }
                     .font(Theme.figure(.caption))
@@ -555,21 +646,24 @@ private struct ManeuverMarker: View {
 /// The walker, drawn the same way the map screen draws the start of a trip so
 /// that the dot means the same thing on both screens.
 private struct WalkerMarker: View {
+    let diameter: CGFloat
+
     var body: some View {
         Circle()
             .fill(Color.white)
-            .frame(width: 12, height: 12)
+            .frame(width: diameter, height: diameter)
+            .overlay(Circle().stroke(Theme.background.opacity(0.75), lineWidth: 2))
             .shadow(color: .black.opacity(0.5), radius: 3)
     }
 }
 
 // MARK: - Phrasing
 
-private extension String {
+extension String {
     /// The instruction as the tail of a longer sentence: "then turn left onto
     /// Powell Street". Every instruction opens with its verb, so lowercasing the
     /// first character is all that joining one to a "then" takes.
-    var sentenceContinuation: String {
+    fileprivate var sentenceContinuation: String {
         guard let first else { return self }
         return first.lowercased() + dropFirst()
     }

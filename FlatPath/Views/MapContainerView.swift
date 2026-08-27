@@ -80,6 +80,31 @@ struct MapContainerView: View {
     /// Why there are no routes, when the reason is worth showing.
     @State private var routingProblem: String?
 
+    /// Why the hill the walker tapped is still on their route.
+    @State private var hillProblem: String?
+
+    /// The identity the next refused hill gets.
+    ///
+    /// Monotonic and never reused. A hill undone and refused again is a new
+    /// avoidance rather than the old one returning, which keeps the detours the
+    /// map is drawing from disagreeing with the list they were built from.
+    @State private var nextAvoidance = 0
+
+    /// How much ground one point of screen currently covers, in meters.
+    ///
+    /// The hill waves are sized from this so that they stay the same size to
+    /// look at whether the map is showing four blocks or the whole city. It is
+    /// held coarsely — see `measureGround(using:)` — so that panning does not
+    /// redraw them at a slightly different size every frame.
+    @State private var groundScale = 1.0
+
+    /// The reroute a tapped hill set off, if one is still being worked out.
+    @State private var rerouting: Task<Void, Never>?
+
+    /// Whether that reroute is still running, which is what makes a second tap
+    /// wait rather than build on a route the first has not finished changing.
+    @State private var isRerouting = false
+
     /// Ties the detour control's moving fill to whichever segment holds it, so
     /// the selection slides between them instead of blinking from one to the next.
     @Namespace private var detourTrack
@@ -154,6 +179,11 @@ struct MapContainerView: View {
                 focused = end
             }
         }
+        .onChange(of: selectedRoute) { _, _ in
+            // The notice was about a hill on the route that was showing when it
+            // was tapped, and there is no hill under it on this one.
+            hillProblem = nil
+        }
         .onChange(of: location.hasFix) { _, hasFix in
             // Frame the arrival of a fix, not every update after it. Re-framing
             // on each new position would wrestle the map back from a walker who
@@ -177,21 +207,37 @@ struct MapContainerView: View {
                 }
 
                 if let selected = routes.first(where: { $0.id == selectedRoute }) {
+                    // Under the line rather than over it: a detour is route,
+                    // and the glow only has to say which stretch of it the
+                    // walker put there and can take back.
+                    ForEach(selected.detours) { detour in
+                        MapPolyline(coordinates: detour.coordinates)
+                            .stroke(Theme.detourGlow, style: Theme.Line.stroke(Theme.Line.detour))
+                    }
+
                     ForEach(selected.shades) { shade in
                         MapPolyline(coordinates: shade.coordinates)
                             .stroke(shade.color, style: Theme.Line.stroke(Theme.Line.selected))
                     }
 
-                    // Only the chosen route is marked for steepness. Warning
+                    // Only the chosen route is marked for steepness. Marking
                     // every line at once would say nothing about the choice
                     // between them, and the walker is comparing routes here --
                     // what they need to see is which parts of *this* one climb.
+                    //
+                    // Drawn in the line's own color, as a wave rather than as a
+                    // warning: the hills are the part of the route the walker
+                    // can argue with, and one is refused by tapping the wave.
                     ForEach(selected.climbs) { climb in
-                        MapPolyline(coordinates: climb.coordinates)
-                            .stroke(
-                                Theme.warning(for: climb.grade) ?? Theme.accent,
-                                style: Theme.Line.stroke(Theme.Line.warning)
-                            )
+                        MapPolyline(coordinates: Zigzag.along(
+                            climb.coordinates,
+                            amplitude: Double(Theme.Line.hillAmplitude) * groundScale,
+                            wavelength: Double(Theme.Line.hillWave) * groundScale
+                        ))
+                        .stroke(
+                            Theme.routeShade(at: climb.along),
+                            style: Theme.Line.stroke(Theme.Line.hill)
+                        )
                     }
                 }
 
@@ -218,6 +264,14 @@ struct MapContainerView: View {
             .mapControls {
                 MapCompass()
                 MapScaleView()
+            }
+            .onMapCameraChange(frequency: .continuous) { context in
+                measureGround(of: context.region, using: proxy)
+            }
+            // Before the long press, so that the shorter gesture is the one a
+            // quick touch on a hill resolves to.
+            .onTapGesture { point in
+                answer(tapAt: point, using: proxy)
             }
             .gesture(dropPin(using: proxy))
         }
@@ -259,6 +313,160 @@ struct MapContainerView: View {
             ),
             as: editing
         )
+    }
+
+    // MARK: Refusing a hill
+
+    /// Note how much ground the map is currently showing, coarsely.
+    ///
+    /// Measured through the proxy rather than from the camera's own figures,
+    /// which are stated in a distance from the ground whose relationship to
+    /// points on the screen depends on the device: converting two coordinates a
+    /// known distance apart and measuring the gap between them asks the map
+    /// directly and cannot drift from what it draws.
+    ///
+    /// Rounded to half-octaves of zoom, and that is the point of it. This runs
+    /// on every frame of a pan, and a scale that changed continuously would
+    /// re-cut every hill wave on the map as the walker's thumb moved -- a
+    /// shimmer along the route that says nothing and costs a redraw. Half an
+    /// octave is close enough that the waves never look wrong and coarse enough
+    /// that ordinary panning does not move between steps at all.
+    private func measureGround(of region: MKCoordinateRegion, using proxy: MapProxy) {
+        // Probed across a quarter of what is on screen, so both ends of the
+        // measurement are inside the map being measured. A probe of some fixed
+        // size on the ground would be far outside the view at street zoom and
+        // would be asking the map to extrapolate.
+        let degrees = region.span.latitudeDelta / 4
+        guard degrees > 0 else { return }
+
+        let here = region.center
+        let north = CLLocationCoordinate2D(latitude: here.latitude + degrees, longitude: here.longitude)
+        guard let from = proxy.convert(here, to: .local),
+              let to = proxy.convert(north, to: .local)
+        else { return }
+
+        let points = hypot(to.x - from.x, to.y - from.y)
+        guard points > 0 else { return }
+
+        let metersPerPoint = degrees * Self.metersPerDegreeLatitude / Double(points)
+        let step = (log2(metersPerPoint) * 2).rounded() / 2
+        groundScale = pow(2, step)
+    }
+
+    private static let metersPerDegreeLatitude = 111_320.0
+
+    /// Take a tap on the map: refuse the hill under it, or put back the ground
+    /// a detour of the walker's own replaced.
+    ///
+    /// Only the chosen route answers, because it is the only one drawn with
+    /// hills on it. A tap that lands on neither is a tap on the map, which is
+    /// something the walker does constantly to steady the phone, and it is
+    /// deliberately not an act.
+    private func answer(tapAt point: CGPoint, using proxy: MapProxy) {
+        // A tap arriving while the last one is still being worked out is
+        // dropped rather than queued. Both taps read the refusals off the route
+        // as it stands, and the second would be built on a list the first has
+        // not added to yet -- which would silently undo it.
+        guard !isRerouting, let selected = routes.first(where: { $0.id == selectedRoute }) else { return }
+
+        let detour = nearest(to: point, among: selected.detours, using: proxy)
+        let climb = nearest(to: point, among: selected.climbs, using: proxy)
+
+        // Undoing wins a tie, and ties are the normal case: a detour was found
+        // to get around a hill, so the two lie near each other by construction.
+        // Between "put this back" and "take away more", the walker who is
+        // pointing at both meant the one that returns the route toward what
+        // they were first shown.
+        if let detour, detour.reach <= (climb?.reach ?? .infinity) {
+            reroute(selected, refusing: selected.avoidances.filter { $0.id != detour.mark.avoidance })
+        } else if let climb {
+            let hill = AvoidedHill(id: nextAvoidance, nodes: climb.mark.nodes, grade: climb.mark.grade)
+            nextAvoidance += 1
+            reroute(selected, refusing: selected.avoidances + [hill])
+        }
+    }
+
+    /// The marked stretch a tap fell nearest to, if it fell near one at all.
+    private func nearest<Mark: RouteMark>(
+        to point: CGPoint,
+        among marks: [Mark],
+        using proxy: MapProxy
+    ) -> (reach: CGFloat, mark: Mark)? {
+        marks
+            .compactMap { mark in
+                reach(from: point, to: mark.coordinates, using: proxy).map { (reach: $0, mark: mark) }
+            }
+            .min { $0.reach < $1.reach }
+    }
+
+    /// How near a tap fell to a stretch of route, in points, or `nil` if it
+    /// fell outside reach of it.
+    ///
+    /// Measured on the screen rather than on the ground, because the screen is
+    /// where the walker aimed. The same twenty meters is a comfortable miss
+    /// across the city and a wild one down a block, and a reach stated in
+    /// meters would make the hills easy to hit at one zoom and impossible at
+    /// another.
+    private func reach(
+        from point: CGPoint,
+        to stretch: [CLLocationCoordinate2D],
+        using proxy: MapProxy
+    ) -> CGFloat? {
+        let drawn = stretch.compactMap { proxy.convert($0, to: .local) }
+        guard drawn.count > 1 else { return nil }
+
+        let nearest = zip(drawn, drawn.dropFirst())
+            .map { point.distance(toSegmentFrom: $0, to: $1) }
+            .min() ?? .infinity
+        return nearest <= Self.tapReach ? nearest : nil
+    }
+
+    /// How far from a marked stretch a tap still counts as a tap on it.
+    ///
+    /// A fingertip covers about this much, and the lines being aimed at are a
+    /// few points across. Drawn tighter, the hills would be a target the walker
+    /// has to hunt for; drawn wider, walking the map would start rerouting it.
+    private static let tapReach: CGFloat = 24
+
+    /// Rebuild one route against a different set of refused hills.
+    ///
+    /// The whole list is handed over rather than the change to it, because the
+    /// route is rebuilt from the original every time: that is what lets any one
+    /// detour be undone while the others stand.
+    private func reroute(_ route: PlannedRoute, refusing hills: [AvoidedHill]) {
+        rerouting?.cancel()
+
+        // Off the main actor for the same reason the first plan is: this is a
+        // handful of searches, and they are being run against a map the walker
+        // still has a finger on.
+        let graph = graph
+        let base = route.base
+        let asked = Set(hills.map(\.id)).subtracting(route.avoidances.map(\.id))
+
+        isRerouting = true
+        rerouting = Task { @MainActor in
+            defer { isRerouting = false }
+
+            let rebuilt = await Task.detached(priority: .userInitiated) {
+                PlannedRoute(base: base, avoidances: hills, in: graph)
+            }.value
+
+            guard !Task.isCancelled, routes.contains(where: { $0.id == rebuilt.id }) else { return }
+
+            // Some hills have no way round. Between the bay and the next hill
+            // there is often nothing to offer, and the honest answer is to
+            // leave the route as it was drawn and say so, rather than to accept
+            // the tap and change nothing visible.
+            guard asked.isSubset(of: rebuilt.applied) else {
+                hillProblem = "There is no easier way around that hill nearby."
+                return
+            }
+
+            hillProblem = nil
+            withAnimation(Theme.Motion.selection) {
+                routes = routes.map { $0.id == rebuilt.id ? rebuilt : $0 }
+            }
+        }
     }
 
     /// Take a chosen place as one end of the trip.
@@ -612,7 +820,7 @@ private extension MapContainerView {
                 }
             }
 
-            if let notice = rejectedPin ?? routingProblem {
+            if let notice = hillProblem ?? rejectedPin ?? routingProblem {
                 Text(notice)
                     .font(Theme.label(.footnote))
                     .foregroundStyle(Theme.secondaryText)
@@ -993,6 +1201,13 @@ private extension MapContainerView {
 
     /// Find the routes for the current pair of endpoints, if there is one.
     func planRoutes() async {
+        // Whatever a walker refused on the last set of routes was a statement
+        // about those routes. A new pair of endpoints is a new walk, and it
+        // arrives with nothing refused on it.
+        hillProblem = nil
+        rerouting?.cancel()
+        isRerouting = false
+
         guard let destination, let start else {
             discardRoutes()
             routingProblem = nil
@@ -1045,6 +1260,7 @@ private extension MapContainerView {
     func discardRoutes() {
         routes = []
         selectedRoute = nil
+        hillProblem = nil
     }
 
 }
@@ -1080,18 +1296,54 @@ private enum Endpoint: Hashable {
     }
 }
 
-/// A route option with its geometry already resolved.
+/// Something drawn along a route that a tap can land on.
+///
+/// The hills and the walker's own detours are hit-tested the same way and are
+/// otherwise unrelated, so what they share is stated here rather than being
+/// written twice at the two call sites.
+private protocol RouteMark: Identifiable {
+    var coordinates: [CLLocationCoordinate2D] { get }
+}
+
+/// A route option with its geometry already resolved, and the walker's own
+/// changes to it.
 ///
 /// The map needs a route as coordinates, and the graph stores it as node
 /// indices. Converting once when the route is found, rather than in the view
 /// body, keeps a few hundred lookups per polyline out of every render pass. The
 /// steep stretches are found in the same pass and for the same reason.
+///
+/// Two routes are held rather than one. `base` is what the planner offered, and
+/// it never changes; `option` is what the walker is actually being shown, which
+/// is `base` with a way round every hill they have refused. Keeping the
+/// original is what makes those refusals reversible: undoing one is dropping it
+/// from a list and rebuilding, not unpicking an edit made in place.
 private struct PlannedRoute: Identifiable {
+    /// The route as planned, before anything was refused on it.
+    let base: RouteOption
+
+    /// The hills the walker has sent this route around, in the order they
+    /// asked.
+    let avoidances: [AvoidedHill]
+
+    /// The route as drawn and as walked: `base`, detoured.
+    ///
+    /// Everything downstream reads this and nothing else, so the cards report
+    /// what the detoured walk costs and turn-by-turn gives directions along the
+    /// road the walker actually chose.
     let option: RouteOption
+
+    /// Which of `avoidances` the city could honour. A hill with no way round
+    /// leaves the route as it was, and this is how the view knows to say so.
+    let applied: Set<AvoidedHill.ID>
+
     let coordinates: [CLLocationCoordinate2D]
 
     /// The parts of the route that climb hard enough to be worth marking.
     let climbs: [Climb]
+
+    /// The stretches that are on the route because the walker refused a hill.
+    let detours: [Detour]
 
     /// The route drawn as consecutive runs, each a shade deeper than the last.
     ///
@@ -1100,7 +1352,11 @@ private struct PlannedRoute: Identifiable {
     /// gaps in it at any zoom.
     let shades: [Shade]
 
-    var id: RouteOption.ID { option.id }
+    /// The identity of the option this came from, which the detours do not
+    /// change. A route the walker has bent around two hills is still the card
+    /// they selected, and taking its id from the planned route is what keeps
+    /// the selection on it across a rebuild.
+    var id: RouteOption.ID { base.id }
 
     /// One solid run of the selected route.
     struct Shade: Identifiable {
@@ -1137,51 +1393,119 @@ private struct PlannedRoute: Identifiable {
     /// A run of consecutive blocks in the same steepness band.
     ///
     /// Runs rather than blocks: a hill is walked as one stretch, and drawing it
-    /// as a dozen separate marks would turn a warning into a dashed line.
-    struct Climb: Identifiable {
+    /// as a dozen separate marks would turn one wave into a row of ticks. It is
+    /// also what the walker refuses when they tap it — a hill is the thing they
+    /// object to, and objecting to one block of it would leave them tapping the
+    /// same slope four times.
+    struct Climb: RouteMark {
         /// Where the run starts along the route, which is unique within it.
         let id: Int
         let grade: Grade
+
+        /// How far along the route the run's middle sits, from 0 to 1, so the
+        /// wave can be drawn in the shade the line itself has there.
+        let along: Double
+
+        /// The graph nodes the run covers, which is what a refusal is stated
+        /// in: the map draws coordinates, but the router needs somewhere to
+        /// route around.
+        let nodes: [Int]
+
         let coordinates: [CLLocationCoordinate2D]
     }
 
-    init(option: RouteOption, coordinates: [CLLocationCoordinate2D], in graph: WalkingGraph) {
-        self.option = option
+    /// A stretch of route the walker's own refusal put there.
+    ///
+    /// Tapping one puts back the hill it was found to avoid, so it carries the
+    /// avoidance it belongs to rather than a copy of what it replaced.
+    struct Detour: RouteMark {
+        /// Where the stretch starts along the route, which is unique within it.
+        /// Not the avoidance's own id: one detour can be drawn in two pieces
+        /// where it rejoins the road it replaced for a block.
+        let id: Int
+        let avoidance: AvoidedHill.ID
+        let coordinates: [CLLocationCoordinate2D]
+    }
+
+    init(base: RouteOption, avoidances: [AvoidedHill] = [], in graph: WalkingGraph) {
+        let detoured = HillDetour.apply(avoidances, to: base, in: graph)
+        let coordinates = detoured.nodes.map { node in
+            CLLocationCoordinate2D(latitude: graph.latitudes[node], longitude: graph.longitudes[node])
+        }
+
+        self.base = base
+        self.avoidances = avoidances
         self.coordinates = coordinates
+        applied = detoured.applied
+
+        // The name and the position on the card list survive: this is still the
+        // option the walker selected, however far around a hill it now goes.
+        option = RouteOption(
+            id: base.id,
+            name: base.name,
+            nodes: detoured.nodes,
+            edges: detoured.edges,
+            metrics: RouteMetrics(edges: detoured.edges, in: graph)
+        )
 
         shades = Self.shades(along: coordinates)
 
-        var climbs: [Climb] = []
-        var runStart: Int?
-        var runGrade = Grade.gentle
-
-        /// Close the run that ends at `position`, if one is open.
-        func closeRun(at position: Int) {
-            guard let start = runStart, runGrade.isWorthWarningAbout else {
-                runStart = nil
-                return
-            }
-            climbs.append(
-                Climb(id: start, grade: runGrade, coordinates: Array(coordinates[start ... position]))
-            )
-            runStart = nil
-        }
-
-        for (position, edge) in option.edges.enumerated() {
+        let spans = max(1, detoured.edges.count)
+        climbs = Self.runs(across: detoured.edges.count) { position in
             let grade = Grade(
-                rise: Double(graph.edgeDeltaElevation[edge]),
-                over: Double(graph.edgeLength[edge])
+                rise: Double(graph.edgeDeltaElevation[detoured.edges[position]]),
+                over: Double(graph.edgeLength[detoured.edges[position]])
             )
-
-            if grade != runGrade {
-                closeRun(at: position)
-                runGrade = grade
-                runStart = grade.isWorthWarningAbout ? position : nil
-            }
+            return grade.isWorthWarningAbout ? grade : nil
         }
-        closeRun(at: option.edges.count)
+        .map { run in
+            Climb(
+                id: run.nodes.lowerBound,
+                grade: run.mark,
+                along: Double(run.nodes.lowerBound + run.nodes.upperBound) / 2 / Double(spans),
+                nodes: Array(detoured.nodes[run.nodes]),
+                coordinates: Array(coordinates[run.nodes])
+            )
+        }
 
-        self.climbs = climbs
+        detours = Self.runs(across: detoured.edges.count) { detoured.detouredBy[$0] }
+            .map { run in
+                Detour(
+                    id: run.nodes.lowerBound,
+                    avoidance: run.mark,
+                    coordinates: Array(coordinates[run.nodes])
+                )
+            }
+    }
+
+    /// Runs of neighbouring edges that agree about a mark, as node ranges.
+    ///
+    /// Both things drawn along a route — the hills and the walker's detours —
+    /// are runs of edges that share something, and both are wanted as node
+    /// ranges because that is what a polyline is drawn from. Edge `i` joins
+    /// nodes `i` and `i + 1`, so a run of edges `first ... last` is bounded by
+    /// the nodes `first` and `last + 1`.
+    private static func runs<Mark: Equatable>(
+        across edges: Int,
+        markedBy mark: (Int) -> Mark?
+    ) -> [(nodes: ClosedRange<Int>, mark: Mark)] {
+        var runs: [(nodes: ClosedRange<Int>, mark: Mark)] = []
+        var position = 0
+
+        while position < edges {
+            guard let found = mark(position) else {
+                position += 1
+                continue
+            }
+
+            var last = position
+            while last + 1 < edges, mark(last + 1) == found { last += 1 }
+
+            runs.append((nodes: position ... last + 1, mark: found))
+            position = last + 1
+        }
+
+        return runs
     }
 }
 
@@ -1223,20 +1547,7 @@ private enum RoutePlan {
             return
         }
 
-        self = .routes(
-            options.map { option in
-                PlannedRoute(
-                    option: option,
-                    coordinates: option.nodes.map { node in
-                        CLLocationCoordinate2D(
-                            latitude: graph.latitudes[node],
-                            longitude: graph.longitudes[node]
-                        )
-                    },
-                    in: graph
-                )
-            }
-        )
+        self = .routes(options.map { PlannedRoute(base: $0, in: graph) })
     }
 }
 
@@ -1256,6 +1567,22 @@ private struct WalkerMarker: View {
 }
 
 // MARK: - Geometry helpers
+
+private extension CGPoint {
+    /// How far this point lies from a line segment, which is what a tap on a
+    /// polyline is asking. Measuring to the drawn vertices instead would let a
+    /// tap in the middle of a long straight block miss the block.
+    func distance(toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {
+        let run = CGPoint(x: end.x - start.x, y: end.y - start.y)
+        let lengthSquared = run.x * run.x + run.y * run.y
+        guard lengthSquared > 0 else { return hypot(x - start.x, y - start.y) }
+
+        // Clamped, so a tap beyond either end measures to that end rather than
+        // to the infinite line the segment sits on.
+        let along = min(max(((x - start.x) * run.x + (y - start.y) * run.y) / lengthSquared, 0), 1)
+        return hypot(x - (start.x + run.x * along), y - (start.y + run.y * along))
+    }
+}
 
 private extension MKCoordinateRegion {
     /// Expands and shifts a region so its original contents are centered in the

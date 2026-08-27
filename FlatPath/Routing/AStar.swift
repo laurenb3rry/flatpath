@@ -34,16 +34,23 @@ enum AStar {
     /// Cheapest route from `start` to `goal`, or `nil` if no path between them
     /// survives `cost`.
     ///
-    /// Two ways that can come back empty, and they mean different things. The
-    /// graph may genuinely not connect the two points; or `cost` may refuse
-    /// enough edges — a grade ceiling does exactly that — to disconnect them for
-    /// this walker while a route still exists for a less particular one. The
-    /// caller decides which of those is worth reporting.
+    /// Three ways that can come back empty, and they mean different things. The
+    /// graph may genuinely not connect the two points; `cost` may refuse enough
+    /// edges — a grade ceiling does exactly that — to disconnect them for this
+    /// walker while a route still exists for a less particular one; or
+    /// `forbiddenEdges` may have taken away the only way through. The caller
+    /// decides which of those is worth reporting.
+    ///
+    /// `forbiddenEdges` are removed from the graph for the duration of the
+    /// search, exactly as a grade ceiling removes the blocks it refuses. That is
+    /// what lets a caller say "not this street" and mean it: a penalty, however
+    /// large, is only a price, and a long enough detour eventually loses to it.
     static func route(
         from start: Int,
         to goal: Int,
         in graph: WalkingGraph,
         cost: WalkingCost,
+        forbiddenEdges: Set<Int> = [],
         penalizedEdges: Set<Int> = [],
         edgePenaltyMultiplier: Double = 1
     ) -> Route? {
@@ -90,6 +97,7 @@ enum AStar {
             for edge in graph.outgoingEdges(of: current) {
                 let neighbor = Int(graph.edgeTo[edge])
                 if finalized[neighbor] { continue }
+                if forbiddenEdges.contains(edge) { continue }
 
                 // A refused edge is not expensive, it is absent. Skipping it
                 // rather than pricing it high is what makes a grade ceiling

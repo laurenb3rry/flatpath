@@ -127,6 +127,15 @@ enum Theme {
     /// rather than a couple of hundred.
     static let routeShadeCount = 28
 
+    /// The stretch of route that exists because the walker refused a hill.
+    ///
+    /// Drawn as a wash under the line rather than as a color of its own: the
+    /// detour is route like the rest of it, and painting it differently would
+    /// say the walker had been given a second, lesser kind of road. It has to
+    /// be visible only because it is the one part of the line that answers a
+    /// tap — the glow is what says "this stretch is yours to undo".
+    static var detourGlow: Color { accent.opacity(0.22) }
+
     /// Routes on offer but not chosen.
     ///
     /// The same emerald held far back, rather than a second hue. A pale blue
@@ -222,10 +231,32 @@ enum Theme {
         /// context rather than three equal lines.
         static let alternative: CGFloat = 4
 
-        /// Steep stretches, laid over the selected route. Narrower than the line
-        /// beneath so the emerald still shows at its edges — the warning marks
-        /// part of the chosen route rather than replacing it.
-        static let warning: CGFloat = 3.5
+        /// The wave drawn over a steep stretch. Narrower than the line beneath
+        /// so the straight route still reads through it: the mark says the
+        /// walking here is work, not that the route goes somewhere else.
+        static let hill: CGFloat = 3.5
+
+        /// How far to either side of the route the hill wave reaches, in
+        /// points.
+        ///
+        /// Set wide enough to clear the route line it is drawn over. At half
+        /// that the wave stays inside the line's own width and reads as a
+        /// serrated edge -- something slightly wrong with the drawing rather
+        /// than a mark someone put there on purpose. It has to break the
+        /// line's silhouette to say that this stretch is different.
+        static let hillAmplitude: CGFloat = 7
+
+        /// Ground covered by one full turn of the hill wave, in points.
+        ///
+        /// Tight enough that a single steep block carries several full cycles,
+        /// which is what makes the mark read as roughness rather than as a
+        /// couple of kinks in the route.
+        static let hillWave: CGFloat = 10
+
+        /// The casing under a stretch the walker's own tap put on the route.
+        /// Wider than the line it sits beneath, so it reads as a glow around
+        /// that stretch rather than as another route crossing it.
+        static let detour: CGFloat = selected + 7
 
         static func stroke(_ width: CGFloat) -> StrokeStyle {
             StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
